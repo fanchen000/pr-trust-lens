@@ -6,7 +6,7 @@ PR Trust Lens asks a narrow security question: *does a GitHub Actions job let a 
 
 It prints a traceable finding, a workflow/line reference and a suggested separation of privileges. The scanner needs **no API keys, network, paid model, or repository permissions**. It never runs the code or Actions workflows it scans.
 
-> **Status:** v0.1.0, early-stage release. Static heuristic checks only; not a complete security audit, runtime sandbox, vulnerability proof, or security guarantee. Contributions, reproducible counterexamples and false-positive reports are welcome.
+> **Status:** v0.2.0, early-stage release. Static heuristic checks only; not a complete security audit, runtime sandbox, vulnerability proof, or security guarantee. Contributions, reproducible counterexamples and false-positive reports are welcome.
 
 ## Why this exists
 
@@ -42,6 +42,12 @@ The unsafe example produces a **PTL001 / HIGH** warning for an AI agent reading 
 | PTL003 | HIGH | Privileged agent workflow on a high-trust event checks out PR head or runs gh pr checkout. |
 | PTL004 | MEDIUM | AI agent on a public-input high-trust event has privileged credentials; direct prompt dataflow not demonstrated. |
 | PTL005 | LOW | Recognized agent job has broad write permission scopes. |
+| PTL006 | MEDIUM | Untrusted event data enters an agent job whose default GITHUB_TOKEN permissions were not explicitly declared; this is **unknown scope**, not proof of write access. |
+
+Beginning in v0.2.0, the scanner follows direct GitHub expressions through
+workflow/job/step environment variables and simple earlier shell steps that explicitly
+write output variables. Findings carry a compact source-to-sink trace; they do not
+assert that the content is an exploit.
 
 Built-in agent signals include recognizable invocations of Codex, Claude Code Action/CLI, Gemini CLI, OpenCode and GitHub Agentic Workflows. Missing or renamed patterns will be missed. A step is identified by its action name or command; mere mention of an agent in a documentation string is not sufficient.
 
@@ -60,7 +66,7 @@ Our own CI is least-privilege and runs on every PR. We intentionally do not publ
 
 **In scope:** a repository maintainer wants an offline review of the static permissions and prompt dataflow of selected GitHub Actions AI-agent jobs. The workflow YAML is treated as untrusted input and is parsed with PyYAML SafeLoader. No templates, shell scripts or actions are executed.
 
-**Out of scope:** proving exploitation; exhaustively following shell variables, artifacts, third-party actions or reusable workflows; discovering hidden default GitHub permissions from repository settings; runtime token access; secrets exposure across containers; prompt-injection detection in model responses; remote workflow downloads; identifying every coding agent. Some indirect dataflows are **not detected** and legitimate intended uses may trigger warnings. Results are conservative signals for review, not a correctness or security certification.
+**Out of scope:** proving exploitation; exhaustively following shell variables, artifacts, third-party actions or reusable workflows; discovering hidden default GitHub permissions from repository settings; runtime token access; secrets exposure across containers; prompt-injection detection in model responses; remote workflow downloads; identifying every coding agent. Dataflow across arbitrary shell commands, branch conditions, multi-line output syntax, composite actions and artifact uploads is **not supported**. Conditional guards and authorization checks are not evaluated. Some indirect dataflows are **not detected** and legitimate intended uses may trigger warnings. Results are conservative signals for review, not a correctness or security certification.
 
 Recommended controls, beyond this tool: isolate untrusted inputs from secrets, grant minimum explicit GITHUB_TOKEN permissions, pin third-party actions, prevent untrusted PR code execution in privileged contexts, and require human approval or validated safe outputs for high-impact actions. Run a general-purpose Actions security scanner alongside this tool.
 
@@ -71,6 +77,11 @@ Recommended controls, beyond this tool: isolate untrusted inputs from secrets, g
     python -m pr_trust_lens scan examples/unsafe-ai-pr.yml --fail-on none
 
 All tests use local synthetic workflows and no accounts or credentials. Security reports: see [SECURITY.md](SECURITY.md). Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+See our [pinned public-source validation](docs/EXTERNAL_VALIDATION_2026-10-22.md)
+and [honest community/adoption accounting](docs/COMMUNITY_AND_ADOPTION.md).
+These public-source scans are our own evaluation, **not evidence that the
+repositories use PR Trust Lens**.
 
 ## Research and primary documentation
 
