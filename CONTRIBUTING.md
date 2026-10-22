@@ -11,3 +11,7 @@ Thank you for helping make AI-assisted open-source maintenance safer.
 The maintainers prefer clear, evidence-based feedback and backward-compatible
 changes to output field names. CLI and SARIF stability are goals, not yet guarantees.
 
+Independent bug reports and improvements are reviewed on merit; issues created
+by the owner do not count as external contributions. For downstream integration
+links, request maintainer permission. See docs/COMMUNITY_AND_ADOPTION.md.
+

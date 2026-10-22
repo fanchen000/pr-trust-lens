@@ -40,6 +40,57 @@ PR_HEAD_MARKERS = ("github.event.pull_request.head.sha",
                    "github.event.pull_request.head.ref",
                    "github.head_ref", "github.event.pull_request.head.repo")
 WRITE_PERMISSIONS = {"write", "write-all"}
+ACTION_EXPR = re.compile(r"\$\{\{\s*(.*?)\s*\}\}", re.DOTALL)
+ENV_REF = re.compile(r"\benv\.([A-Za-z_][A-Za-z0-9_]*)\b", re.I)
+STEP_REF = re.compile(
+    r"\bsteps\.([A-Za-z_][A-Za-z0-9_-]*)\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)\b",
+    re.I,
+)
+OUTPUT_NAME = re.compile(r"""(?:echo\s+['"]?)([A-Za-z_][A-Za-z0-9_-]*)=""", re.I)
+SHELL_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+class BoundedSafeLoader(yaml.SafeLoader):
+    """Limit YAML alias expansion / nesting and reject duplicate YAML keys."""
+
+    MAX_NODES = 10_000
+    MAX_ALIASES = 100
+    MAX_DEPTH = 75
+
+    def __init__(self, stream: str):
+        super().__init__(stream)
+        self.nodes_seen = 0
+        self.aliases_seen = 0
+        self.node_depth = 0
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(yaml.AliasEvent):
+            self.aliases_seen += 1
+            if self.aliases_seen > self.MAX_ALIASES:
+                raise yaml.YAMLError("too many YAML aliases")
+        self.nodes_seen += 1
+        if self.nodes_seen > self.MAX_NODES:
+            raise yaml.YAMLError("too many YAML nodes")
+        self.node_depth += 1
+        try:
+            if self.node_depth > self.MAX_DEPTH:
+                raise yaml.YAMLError("YAML nesting is too deep")
+            return super().compose_node(parent, index)
+        finally:
+            self.node_depth -= 1
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> Any:
+        if isinstance(node, yaml.MappingNode):
+            seen: set[Any] = set()
+            for key_node, _ in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                try:
+                    if key in seen:
+                        raise yaml.YAMLError(f"duplicate YAML key: {key!r}")
+                    seen.add(key)
+                except TypeError as exc:
+                    raise yaml.YAMLError("unhashable YAML mapping key") from exc
+        return super().construct_mapping(node, deep=deep)
 
 
 @dataclass(frozen=True)
@@ -100,6 +151,64 @@ def _expression_contains(value: str, needle: str) -> bool:
                if "}}" in section)
 
 
+def _taint(
+    value: str,
+    env: dict[str, Any],
+    outputs: dict[tuple[str, str], dict[str, str]],
+    seen: frozenset[str] = frozenset(),
+    depth: int = 0,
+) -> dict[str, str]:
+    """Bounded expression provenance through scoped env and known step outputs."""
+    if depth > 12:
+        return {}
+    sources: dict[str, str] = {}
+    for expression in ACTION_EXPR.findall(value):
+        lowered = expression.lower()
+        for marker in UNTRUSTED_INPUTS:
+            if re.search(r"(?<![\w.])" + re.escape(marker) + r"(?![\w.])", lowered):
+                sources[marker] = marker
+        for name in ENV_REF.findall(expression):
+            lookup = f"env.{name}"
+            if lookup.lower() not in seen and name in env:
+                refs = _taint(_flat(env[name]), env, outputs,
+                              seen | {lookup.lower()}, depth + 1)
+                for marker, chain in refs.items():
+                    sources[marker] = f"{chain} -> {lookup}"
+        for step_id, key in STEP_REF.findall(expression):
+            for marker, chain in outputs.get((step_id.lower(), key.lower()), {}).items():
+                sources[marker] = f"{chain} -> steps.{step_id}.outputs.{key}"
+    return sources
+
+
+def _step_outputs(
+    step: dict[str, Any],
+    env: dict[str, Any],
+    outputs: dict[tuple[str, str], dict[str, str]],
+) -> dict[tuple[str, str], dict[str, str]]:
+    step_id = step.get("id")
+    script = step.get("run")
+    if not isinstance(step_id, str) or not isinstance(script, str):
+        return {}
+    produced: dict[tuple[str, str], dict[str, str]] = {}
+    step_env = {**env, **(step.get("env") if isinstance(step.get("env"), dict) else {})}
+    for line in script.splitlines():
+        if "GITHUB_OUTPUT" not in line or ">>" not in line:
+            continue
+        named = OUTPUT_NAME.search(line)
+        if not named:
+            continue
+        traces = _taint(line, step_env, outputs)
+        # Only trace explicit variable references on the output-writing line.
+        for variable in SHELL_VARIABLE.finditer(line):
+            name = variable.group(1) or variable.group(2)
+            if name in step_env:
+                for marker, chain in _taint(_flat(step_env[name]), step_env, outputs).items():
+                    traces[marker] = f"{chain} -> shell.$" + name
+        if traces:
+            produced[(step_id.lower(), named.group(1).lower())] = traces
+    return produced
+
+
 def _has_agent(step: dict[str, Any]) -> bool:
     text = _flat({"uses": step.get("uses", ""), "run": step.get("run", "")}).lower()
     return any(marker in text for marker in AGENT_MARKERS)
@@ -113,15 +222,17 @@ def _permission_is_write(value: Any) -> bool:
     return False
 
 
-def _job_privilege(doc: dict[str, Any], job: dict[str, Any]) -> tuple[bool, str]:
+def _job_privilege(doc: dict[str, Any], job: dict[str, Any],
+                   agent_steps: list[dict[str, Any]]) -> tuple[bool, str]:
     perms = job.get("permissions", doc.get("permissions"))
     if _permission_is_write(perms):
         return True, "write-capable GITHUB_TOKEN"
-    combined = _flat({"env": doc.get("env", {}), "job": job}).lower()
-    if "secrets." in combined or "github.token" in combined:
-        # github.token by itself is not necessarily write-capable.
-        if "secrets." in combined:
-            return True, "secret reference in the job or workflow"
+    # Do not attribute a secret in an unrelated step to the agent.
+    materialized = {"workflow_env": doc.get("env", {}), "job_env": job.get("env", {}),
+                    "agents": [{"env": s.get("env"), "with": s.get("with"),
+                                "run": s.get("run")} for s in agent_steps]}
+    if _expression_contains(_flat(materialized), "secrets."):
+        return True, "secret reference in the agent or inherited environment"
     return False, "no explicit write token or secret detected"
 
 
@@ -135,8 +246,9 @@ def _line(text: str, evidence: str) -> int:
 
 
 def _finding(rule: str, severity: str, filename: str, text: str, job_id: str,
-             message: str, evidence: str, remedy: str) -> Finding:
-    return Finding(rule, severity, filename, _line(text, evidence), job_id,
+             message: str, evidence: str, remedy: str,
+             location_hint: str | None = None) -> Finding:
+    return Finding(rule, severity, filename, _line(text, location_hint or evidence), job_id,
                    message, evidence[:250], remedy)
 
 
@@ -148,7 +260,7 @@ def analyze_workflow(path: Path, display_path: str | None = None) -> list[Findin
         if path.stat().st_size > MAX_WORKFLOW_BYTES:
             raise ScanError(f"Workflow is larger than {MAX_WORKFLOW_BYTES} bytes: {path}")
         text = path.read_text(encoding="utf-8")
-        doc = yaml.safe_load(text)
+        doc = yaml.load(text, Loader=BoundedSafeLoader)
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise ScanError(f"Cannot parse {path}: {exc}") from exc
     if not isinstance(doc, dict):
@@ -173,25 +285,43 @@ def analyze_workflow(path: Path, display_path: str | None = None) -> list[Findin
         agent_steps = [step for step in steps if _has_agent(step)]
         if not agent_steps:
             continue  # This scanner is intentionally AI-agent-specific.
-        privileged, reason = _job_privilege(doc, job)
-        input_markers = sorted(marker for marker in UNTRUSTED_INPUTS
-                               if any(_expression_contains(_flat(step), marker)
-                                      for step in agent_steps))
-        # A pipeline may pull PR text into an env var via an earlier step; the
-        # static analysis does not currently follow those indirect variables.
+        privileged, reason = _job_privilege(doc, job, agent_steps)
+        job_env = {**(doc.get("env") if isinstance(doc.get("env"), dict) else {}),
+                   **(job.get("env") if isinstance(job.get("env"), dict) else {})}
+        outputs: dict[tuple[str, str], dict[str, str]] = {}
+        input_sources: dict[str, str] = {}
+        for step in steps:
+            if _has_agent(step):
+                local_env = {**job_env, **(step.get("env") if isinstance(step.get("env"), dict) else {})}
+                # 'if' controls whether a step runs; it is not itself a prompt.
+                inputs = {"with": step.get("with"), "env": step.get("env"), "run": step.get("run")}
+                for marker, chain in _taint(_flat(inputs), local_env, outputs).items():
+                    input_sources[marker] = chain
+            outputs.update(_step_outputs(step, job_env, outputs))
+        input_markers = sorted(input_sources)
+        permissions_declared = ("permissions" in job or "permissions" in doc)
         for marker in input_markers:
             if privileged and high_trust:
                 findings.append(_finding(
                     "PTL001", "high", display, text, str(job_id),
                     f"AI agent reads untrusted event data with {reason}.",
-                    marker,
+                    input_sources[marker],
                     "Move the AI step to a read-only, secret-free job; use an "
-                    "isolated downstream job with explicitly validated safe outputs."))
+                    "isolated downstream job with explicitly validated safe outputs.",
+                    location_hint=marker))
             elif privileged:
                 findings.append(_finding(
                     "PTL002", "medium", display, text, str(job_id),
                     f"AI agent receives event-controlled data with {reason}; verify fork restrictions.",
-                    marker, "Use read-only token and remove secrets from the agent job."))
+                    input_sources[marker], "Use read-only token and remove secrets from the agent job.",
+                    location_hint=marker))
+            elif high_trust and not permissions_declared:
+                findings.append(_finding(
+                    "PTL006", "medium", display, text, str(job_id),
+                    "Untrusted event data enters an AI agent without explicit GITHUB_TOKEN permissions; effective privileges are unknown.",
+                    input_sources[marker],
+                    "Declare job permissions explicitly (prefer contents: read); isolate secrets and all write actions.",
+                    location_hint=marker))
         if high_trust and privileged:
             for step in steps:
                 uses = str(step.get("uses", "")).lower()

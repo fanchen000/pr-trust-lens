@@ -129,6 +129,182 @@ jobs:
 """
         self.assertEqual([], self.findings(src))
 
+    def test_workflow_env_indirect_flow(self):
+        src = """on: issue_comment
+env:
+  PR_TEXT: "${{ github.event.comment.body }}"
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions: {contents: write}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "${{ env.PR_TEXT }}"
+"""
+        matches = self.findings(src)
+        self.assertIn("PTL001", {x.rule_id for x in matches})
+        self.assertIn("env.PR_TEXT", matches[0].evidence)
+        self.assertEqual(matches[0].line, 3)
+
+    def test_job_env_indirect_flow(self):
+        src = workflow(prompt="${{ env.PR_TEXT }}")
+        src = src.replace("    steps:\n", "    env:\n      PR_TEXT: '${{ github.event.issue.body }}'\n    steps:\n")
+        self.assertIn("PTL001", self.rules(src))
+
+    def test_step_env_indirect_flow(self):
+        src = workflow(prompt="${{ env.PR_TEXT }}")
+        src = src.replace("        with:\n", "        env:\n          PR_TEXT: '${{ github.event.comment.body }}'\n        with:\n")
+        self.assertIn("PTL001", self.rules(src))
+
+    def test_step_output_provenance(self):
+        src = """on: issue_comment
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions: {issues: write}
+    steps:
+      - id: extract
+        run: echo "payload=${{ github.event.comment.body }}" >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "${{ steps.extract.outputs.payload }}"
+"""
+        f = self.findings(src)
+        self.assertIn("PTL001", {x.rule_id for x in f})
+        self.assertIn("steps.extract.outputs.payload", f[0].evidence)
+        self.assertEqual(f[0].line, 8)
+
+    def test_step_output_via_shell_env(self):
+        src = """on: issues
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions: {issues: write}
+    steps:
+      - id: stage
+        env:
+          PAYLOAD: "${{ github.event.issue.body }}"
+        run: echo "data=$PAYLOAD" >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "${{ steps.stage.outputs.data }}"
+"""
+        f = self.findings(src)
+        self.assertIn("PTL001", {x.rule_id for x in f})
+        self.assertIn("shell.$PAYLOAD", f[0].evidence)
+
+    def test_no_taint_from_unrelated_prior_step(self):
+        src = """on: issue_comment
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions: {contents: write}
+    steps:
+      - id: extract
+        run: echo "${{ github.event.comment.body }}"
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "Review code"
+"""
+        f = self.findings(src)
+        self.assertNotIn("PTL001", {x.rule_id for x in f})
+        self.assertIn("PTL004", {x.rule_id for x in f})
+
+    def test_no_taint_from_if_expression_only(self):
+        src = workflow(prompt="Code review")
+        src = src.replace("        with:\n", "        if: ${{ github.event.comment.body != '' }}\n        with:\n")
+        self.assertNotIn("PTL001", self.rules(src))
+
+    def test_env_override_wins(self):
+        src = """on: issue_comment
+env:
+  INPUT: "${{ github.event.issue.body }}"
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions: {contents: write}
+    env:
+      INPUT: "known safe text"
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "${{ env.INPUT }}"
+"""
+        self.assertNotIn("PTL001", self.rules(src))
+
+    def test_unused_step_output_not_tainted(self):
+        src = """on: issue_comment
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions: {contents: write}
+    steps:
+      - id: get
+        run: echo "other=${{ github.event.comment.body }}" >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "${{ steps.get.outputs.safe }}"
+"""
+        self.assertNotIn("PTL001", self.rules(src))
+
+    def test_unknown_token_permission_is_not_assumed_safe(self):
+        src = """on: issue_comment
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ github.event.comment.body }}"}
+"""
+        r = self.rules(src)
+        self.assertIn("PTL006", r)
+        self.assertNotIn("PTL001", r)
+
+    def test_explicit_read_only_is_not_unknown(self):
+        self.assertNotIn("PTL006", self.rules(workflow(permissions="contents: read")))
+
+    def test_duplicate_top_level_permissions_rejected(self):
+        with self.assertRaises(ScanError):
+            self.findings("on: issues\npermissions: {contents: read}\npermissions: {contents: write}\njobs: {}\n")
+
+    def test_duplicate_nested_permission_rejected(self):
+        with self.assertRaises(ScanError):
+            self.findings(workflow(permissions="contents: read\ncontents: write"))
+
+    def test_excessive_aliases_rejected(self):
+        src = "name: alias limit\nseed: &v sample\naliases:\n" + "\n".join("  - *v" for _ in range(110)) + "\njobs: {}\n"
+        with self.assertRaises(ScanError):
+            self.findings(src)
+
+    def test_indirect_env_cycle_terminates(self):
+        src = """on: issues
+jobs:
+  review:
+    permissions: {contents: write}
+    env:
+      ONE: "${{ env.TWO }}"
+      TWO: "${{ env.ONE }}"
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ env.ONE }}"}
+"""
+        self.assertNotIn("PTL001", self.rules(src))
+
+    def test_secret_only_in_other_step_not_agent_credentials(self):
+        src = """on: issue_comment
+jobs:
+  review:
+    permissions: {contents: read}
+    steps:
+      - name: unrelated
+        run: echo "doing a job"
+        env: {SOME_KEY: "${{ secrets.DEPLOY_KEY }}"}
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ github.event.comment.body }}"}
+"""
+        self.assertNotIn("PTL001", self.rules(src))
+
     def test_bad_yaml_fails_closed(self):
         with self.assertRaises(ScanError):
             self.findings("jobs: [oops\n")

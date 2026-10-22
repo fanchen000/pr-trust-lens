@@ -1,0 +1,45 @@
+name: False-positive or false-negative report
+description: Help improve the accuracy of an AI-agent trust boundary finding.
+title: "[accuracy] "
+labels:
+  - accuracy
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share only sanitized workflows. Do not disclose secrets, private paths,
+        undisclosed vulnerabilities or personal details. Use private reporting
+        for sensitive security problems.
+  - type: dropdown
+    id: type
+    attributes:
+      label: Report type
+      options:
+        - False positive
+        - False negative
+        - Unclear severity or evidence
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: PR Trust Lens version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal sanitized workflow
+      description: Include trigger, permissions, job, input and agent step.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Observed and expected behavior
+      description: Include rule ID, why mistaken or missing, and relevant guards.
+    validations:
+      required: true
+
