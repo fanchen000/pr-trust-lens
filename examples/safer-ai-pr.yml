@@ -1,0 +1,15 @@
+name: Safer demo (still requires threat review)
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  reviewer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "Review the checked-out diff only. Do not perform write actions."
+

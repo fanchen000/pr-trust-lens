@@ -1,0 +1,15 @@
+name: Unsafe demo (DO NOT USE IN PRODUCTION)
+on: issue_comment
+permissions:
+  contents: write
+jobs:
+  reviewer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "${{ github.event.comment.body }}"
+        env:
+          DEMO_SECRET: "${{ secrets.DEMO_KEY }}"
+
