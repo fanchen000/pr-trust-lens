@@ -11,6 +11,8 @@ import yaml
 
 MAX_WORKFLOW_BYTES = 2_000_000
 MAX_WORKFLOWS = 1_000
+MAX_LINKED_CALLS = 200
+MAX_LINK_DEPTH = 8
 
 AGENT_MARKERS = (
     "anthropics/claude-code-action",
@@ -41,43 +43,28 @@ PR_HEAD_MARKERS = ("github.event.pull_request.head.sha",
                    "github.head_ref", "github.event.pull_request.head.repo")
 WRITE_PERMISSIONS = {"write", "write-all"}
 ACTION_EXPR = re.compile(r"\$\{\{\s*(.*?)\s*\}\}", re.DOTALL)
-ENV_REF = re.compile(r"\benv\.([A-Za-z_][A-Za-z0-9_]*)\b", re.I)
-STEP_REF = re.compile(
-    r"\bsteps\.([A-Za-z_][A-Za-z0-9_-]*)\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)\b",
-    re.I,
+ROOT_REF = re.compile(r"(?:github|env|steps|inputs|secrets)\b", re.I)
+DOT_REF = re.compile(r"\.([A-Za-z_][A-Za-z0-9_-]*)")
+BRACKET_REF = re.compile(r"""\[\s*(['"])([A-Za-z_][A-Za-z0-9_-]*)\1\s*\]""")
+# Supported subset of the GITHUB_OUTPUT protocol: a single echo assignment
+# redirected to the real output file, not a comment / unrelated command.
+OUTPUT_WRITE = re.compile(
+    r"""^\s*echo\s+(?P<quote>['"])(?P<name>[A-Za-z_][A-Za-z0-9_-]*)=(?P<value>.*?)"""
+    r"""(?P=quote)\s*>>\s*["']?\$(?:GITHUB_OUTPUT|\{GITHUB_OUTPUT\})["']?\s*(?:#.*)?$"""
 )
-OUTPUT_NAME = re.compile(r"""(?:echo\s+['"]?)([A-Za-z_][A-Za-z0-9_-]*)=""", re.I)
 SHELL_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
 
-class BoundedSafeLoader(yaml.SafeLoader):
-    """Limit YAML alias expansion / nesting and reject duplicate YAML keys."""
+class BoundedSafeLoader(getattr(yaml, "CSafeLoader", yaml.SafeLoader)):
+    """Use a safe loader with strict duplicate-key rejection.
+
+    Token/depth limits are enforced by _check_yaml_limits before construction,
+    including when accelerated libyaml is available.
+    """
 
     MAX_NODES = 10_000
     MAX_ALIASES = 100
     MAX_DEPTH = 75
-
-    def __init__(self, stream: str):
-        super().__init__(stream)
-        self.nodes_seen = 0
-        self.aliases_seen = 0
-        self.node_depth = 0
-
-    def compose_node(self, parent: Any, index: Any) -> Any:
-        if self.check_event(yaml.AliasEvent):
-            self.aliases_seen += 1
-            if self.aliases_seen > self.MAX_ALIASES:
-                raise yaml.YAMLError("too many YAML aliases")
-        self.nodes_seen += 1
-        if self.nodes_seen > self.MAX_NODES:
-            raise yaml.YAMLError("too many YAML nodes")
-        self.node_depth += 1
-        try:
-            if self.node_depth > self.MAX_DEPTH:
-                raise yaml.YAMLError("YAML nesting is too deep")
-            return super().compose_node(parent, index)
-        finally:
-            self.node_depth -= 1
 
     def construct_mapping(self, node: Any, deep: bool = False) -> Any:
         if isinstance(node, yaml.MappingNode):
@@ -93,6 +80,33 @@ class BoundedSafeLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep=deep)
 
 
+def _check_yaml_limits(text: str) -> None:
+    """Count real YAML tokens before safe object construction, without aliases
+    being expanded. C-backed scanning keeps large generated workflows practical.
+    """
+    depth = 0
+    nodes = 0
+    aliases = 0
+    starts = (yaml.BlockMappingStartToken, yaml.BlockSequenceStartToken,
+              yaml.FlowMappingStartToken, yaml.FlowSequenceStartToken)
+    ends = (yaml.BlockEndToken, yaml.FlowMappingEndToken, yaml.FlowSequenceEndToken)
+    for token in yaml.scan(text, Loader=BoundedSafeLoader):
+        if isinstance(token, yaml.AliasToken):
+            aliases += 1
+            if aliases > BoundedSafeLoader.MAX_ALIASES:
+                raise yaml.YAMLError("too many YAML aliases")
+        if isinstance(token, starts):
+            depth += 1
+            if depth > BoundedSafeLoader.MAX_DEPTH:
+                raise yaml.YAMLError("YAML nesting is too deep")
+        elif isinstance(token, ends):
+            depth -= 1
+        if isinstance(token, (*starts, yaml.ScalarToken, yaml.AliasToken)):
+            nodes += 1
+            if nodes > BoundedSafeLoader.MAX_NODES:
+                raise yaml.YAMLError("too many YAML nodes")
+
+
 @dataclass(frozen=True)
 class Finding:
     rule_id: str
@@ -106,6 +120,17 @@ class Finding:
 
     def json(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CallContext:
+    """One actual local caller route; never inferred from external workflows."""
+
+    events: frozenset[str]
+    inputs: dict[str, dict[str, str]]
+    token_cap: str  # write, read, or unknown; nested calls cannot elevate
+    allows_secrets: bool
+    via: str
 
 
 class ScanError(Exception):
@@ -145,10 +170,57 @@ def _flat(value: Any, seen: set[int] | None = None, depth: int = 0) -> str:
 
 def _expression_contains(value: str, needle: str) -> bool:
     """Treat a source as an input only when it is inside an Actions expression."""
-    expression_start = "$" + "{{"
-    return any(needle in section.lower().split("}}", 1)[0]
-               for section in value.split(expression_start)[1:]
-               if "}}" in section)
+    return any(
+        ref.lower() == needle.lower() or (
+            needle.endswith(".") and ref.lower().startswith(needle.lower()))
+        for expression in ACTION_EXPR.findall(value)
+        for ref in _expression_refs(expression)
+    )
+
+
+def _expression_refs(expression: str) -> list[str]:
+    """Lex supported Actions context paths, never executing expressions.
+
+    GitHub supports both dot and literal bracket selectors. Quoted string
+    *values* are skipped so format('github.event.comment.body') is not a
+    source, while github['event']['comment']['body'] remains a source.
+    Dynamic selectors are intentionally not resolved.
+    """
+    refs: list[str] = []
+    pos = 0
+    while pos < len(expression):
+        if expression[pos] in ("'", '"'):
+            quote = expression[pos]
+            pos += 1
+            while pos < len(expression):
+                if expression[pos] == quote:
+                    pos += 1
+                    if pos < len(expression) and expression[pos] == quote:
+                        pos += 1
+                        continue
+                    break
+                pos += 1
+            continue
+        root = ROOT_REF.match(expression, pos)
+        if root and (pos == 0 or not (
+            expression[pos - 1].isalnum() or expression[pos - 1] in "_."
+        )):
+            parts = [root.group(0)]
+            end = root.end()
+            while True:
+                dot = DOT_REF.match(expression, end)
+                bracket = BRACKET_REF.match(expression, end)
+                match = dot or bracket
+                if not match:
+                    break
+                parts.append(dot.group(1) if dot else bracket.group(2))
+                end = match.end()
+            if len(parts) > 1:
+                refs.append(".".join(parts))
+            pos = end
+        else:
+            pos += 1
+    return refs
 
 
 def _taint(
@@ -157,26 +229,32 @@ def _taint(
     outputs: dict[tuple[str, str], dict[str, str]],
     seen: frozenset[str] = frozenset(),
     depth: int = 0,
+    inputs: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, str]:
     """Bounded expression provenance through scoped env and known step outputs."""
     if depth > 12:
         return {}
     sources: dict[str, str] = {}
     for expression in ACTION_EXPR.findall(value):
-        lowered = expression.lower()
-        for marker in UNTRUSTED_INPUTS:
-            if re.search(r"(?<![\w.])" + re.escape(marker) + r"(?![\w.])", lowered):
-                sources[marker] = marker
-        for name in ENV_REF.findall(expression):
-            lookup = f"env.{name}"
-            if lookup.lower() not in seen and name in env:
-                refs = _taint(_flat(env[name]), env, outputs,
-                              seen | {lookup.lower()}, depth + 1)
-                for marker, chain in refs.items():
-                    sources[marker] = f"{chain} -> {lookup}"
-        for step_id, key in STEP_REF.findall(expression):
-            for marker, chain in outputs.get((step_id.lower(), key.lower()), {}).items():
-                sources[marker] = f"{chain} -> steps.{step_id}.outputs.{key}"
+        for ref in _expression_refs(expression):
+            canonical = ref.lower()
+            if canonical in UNTRUSTED_INPUTS:
+                sources[canonical] = ref
+            parts = canonical.split(".")
+            if len(parts) == 2 and parts[0] == "env":
+                key_name = ref.split(".")[1]
+                key = next((k for k in env if k == key_name), None)
+                if canonical not in seen and key is not None:
+                    nested = _taint(_flat(env[key]), env, outputs,
+                                    seen | {canonical}, depth + 1, inputs)
+                    for marker, chain in nested.items():
+                        sources[marker] = f"{chain} -> {ref}"
+            if len(parts) == 4 and parts[0] == "steps" and parts[2] == "outputs":
+                for marker, chain in outputs.get((parts[1], parts[3]), {}).items():
+                    sources[marker] = f"{chain} -> {ref}"
+            if len(parts) == 2 and parts[0] == "inputs" and inputs:
+                for marker, chain in inputs.get(parts[1], {}).items():
+                    sources[marker] = f"{chain} -> {ref}"
     return sources
 
 
@@ -184,6 +262,7 @@ def _step_outputs(
     step: dict[str, Any],
     env: dict[str, Any],
     outputs: dict[tuple[str, str], dict[str, str]],
+    inputs: dict[str, dict[str, str]] | None = None,
 ) -> dict[tuple[str, str], dict[str, str]]:
     step_id = step.get("id")
     script = step.get("run")
@@ -192,20 +271,21 @@ def _step_outputs(
     produced: dict[tuple[str, str], dict[str, str]] = {}
     step_env = {**env, **(step.get("env") if isinstance(step.get("env"), dict) else {})}
     for line in script.splitlines():
-        if "GITHUB_OUTPUT" not in line or ">>" not in line:
+        named = OUTPUT_WRITE.match(line)
+        if named is None:
             continue
-        named = OUTPUT_NAME.search(line)
-        if not named:
-            continue
-        traces = _taint(line, step_env, outputs)
+        value = named.group("value")
+        traces = _taint(value, step_env, outputs, inputs=inputs)
         # Only trace explicit variable references on the output-writing line.
-        for variable in SHELL_VARIABLE.finditer(line):
-            name = variable.group(1) or variable.group(2)
-            if name in step_env:
-                for marker, chain in _taint(_flat(step_env[name]), step_env, outputs).items():
-                    traces[marker] = f"{chain} -> shell.$" + name
+        if named.group("quote") == '"':
+            for variable in SHELL_VARIABLE.finditer(value):
+                name = variable.group(1) or variable.group(2)
+                if name in step_env:
+                    for marker, chain in _taint(_flat(step_env[name]), step_env, outputs,
+                                               inputs=inputs).items():
+                        traces[marker] = f"{chain} -> shell.$" + name
         if traces:
-            produced[(step_id.lower(), named.group(1).lower())] = traces
+            produced[(step_id.lower(), named.group("name").lower())] = traces
     return produced
 
 
@@ -236,11 +316,31 @@ def _job_privilege(doc: dict[str, Any], job: dict[str, Any],
     return False, "no explicit write token or secret detected"
 
 
+def _token_cap(doc: dict[str, Any], job: dict[str, Any],
+               inherited: str = "write") -> str:
+    """Conservatively model GitHub reusable-workflow token permission ceilings."""
+    perms = job.get("permissions", doc.get("permissions"))
+    if inherited == "read":
+        return "read"
+    if perms is not None and not _permission_is_write(perms):
+        return "read"
+    if inherited == "unknown" or perms is None:
+        return "unknown"
+    return "write"
+
+
 def _line(text: str, evidence: str) -> int:
     # Best-effort line mapping: make no promise that an expression occurs once.
     needle = evidence.strip()
     for idx, line in enumerate(text.splitlines(), 1):
         if needle and needle in line:
+            return idx
+        # Bracket syntax should point at the actual expression, not line 1.
+        if needle and any(
+            ref.lower() == needle.lower()
+            for expr in ACTION_EXPR.findall(line)
+            for ref in _expression_refs(expr)
+        ):
             return idx
     return 1
 
@@ -252,23 +352,34 @@ def _finding(rule: str, severity: str, filename: str, text: str, job_id: str,
                    message, evidence[:250], remedy)
 
 
-def analyze_workflow(path: Path, display_path: str | None = None) -> list[Finding]:
-    """Analyze a YAML file without evaluating scripts, expressions or remote URLs."""
+def _load_workflow(path: Path) -> tuple[str, dict[str, Any]]:
+    """Fail closed for invalid local documents before graph analysis."""
     try:
         if path.is_symlink():
             raise ScanError(f"Refusing symlink: {path}")
         if path.stat().st_size > MAX_WORKFLOW_BYTES:
             raise ScanError(f"Workflow is larger than {MAX_WORKFLOW_BYTES} bytes: {path}")
         text = path.read_text(encoding="utf-8")
+        _check_yaml_limits(text)
         doc = yaml.load(text, Loader=BoundedSafeLoader)
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeError, yaml.YAMLError, RecursionError) as exc:
         raise ScanError(f"Cannot parse {path}: {exc}") from exc
     if not isinstance(doc, dict):
         raise ScanError(f"Workflow root must be a YAML mapping: {path}")
+    if not isinstance(doc.get("jobs", {}), dict):
+        raise ScanError(f"'jobs' must be a mapping in {path}")
+    return text, doc
+
+
+def analyze_workflow(path: Path, display_path: str | None = None,
+                     *, context: CallContext | None = None,
+                     loaded: tuple[str, dict[str, Any]] | None = None) -> list[Finding]:
+    """Analyze a YAML file without evaluating scripts, expressions or remote URLs."""
+    text, doc = loaded if loaded is not None else _load_workflow(path)
     jobs = doc.get("jobs", {})
     if not isinstance(jobs, dict):
         raise ScanError(f"'jobs' must be a mapping in {path}")
-    events = _events(doc)
+    events = set(context.events) if context else _events(doc)
     high_trust = bool(events & HIGH_TRUST_EVENTS)
     display = display_path or str(path)
     findings: list[Finding] = []
@@ -286,6 +397,20 @@ def analyze_workflow(path: Path, display_path: str | None = None) -> list[Findin
         if not agent_steps:
             continue  # This scanner is intentionally AI-agent-specific.
         privileged, reason = _job_privilege(doc, job, agent_steps)
+        effective = (_token_cap(doc, job, context.token_cap) if context else
+                     _token_cap(doc, job, "unknown"))
+        if context:
+            inherited_env = {"workflow_env": doc.get("env", {}), "job_env": job.get("env", {}),
+                             "agents": [{"env": s.get("env"), "with": s.get("with"),
+                                         "run": s.get("run")} for s in agent_steps]}
+            has_secret = context.allows_secrets and _expression_contains(
+                _flat(inherited_env), "secrets."
+            )
+            privileged = effective == "write" or has_secret
+            reason = ("write-capable inherited GITHUB_TOKEN" if effective == "write" else
+                      "caller-passed secret reference" if has_secret else
+                      "effective token permissions unknown" if effective == "unknown" else
+                      "read-only inherited GITHUB_TOKEN")
         job_env = {**(doc.get("env") if isinstance(doc.get("env"), dict) else {}),
                    **(job.get("env") if isinstance(job.get("env"), dict) else {})}
         outputs: dict[tuple[str, str], dict[str, str]] = {}
@@ -295,13 +420,28 @@ def analyze_workflow(path: Path, display_path: str | None = None) -> list[Findin
                 local_env = {**job_env, **(step.get("env") if isinstance(step.get("env"), dict) else {})}
                 # 'if' controls whether a step runs; it is not itself a prompt.
                 inputs = {"with": step.get("with"), "env": step.get("env"), "run": step.get("run")}
-                for marker, chain in _taint(_flat(inputs), local_env, outputs).items():
+                for marker, chain in _taint(_flat(inputs), local_env, outputs,
+                                            inputs=context.inputs if context else None).items():
                     input_sources[marker] = chain
-            outputs.update(_step_outputs(step, job_env, outputs))
+            outputs.update(_step_outputs(step, job_env, outputs,
+                                         inputs=context.inputs if context else None))
         input_markers = sorted(input_sources)
         permissions_declared = ("permissions" in job or "permissions" in doc)
         for marker in input_markers:
-            if privileged and high_trust:
+            if context:
+                if not privileged and (effective != "unknown" or not high_trust):
+                    continue
+                severity = ("high" if privileged and high_trust else "medium")
+                hint = re.search(r"inputs\.[A-Za-z_][A-Za-z0-9_-]*",
+                                 input_sources[marker])
+                findings.append(_finding(
+                    "PTL007", severity, display, text,
+                    f"{context.via} -> {job_id}",
+                    f"Local reusable workflow: traced caller-controlled data reaches an AI agent with {reason}; caller guards not evaluated.",
+                    f"{context.via}: {input_sources[marker]}",
+                    "Validate caller trust and inputs, explicitly minimize caller and callee token permissions; separate agent from privileged writes.",
+                    location_hint=hint.group(0) if hint else marker))
+            elif privileged and high_trust:
                 findings.append(_finding(
                     "PTL001", "high", display, text, str(job_id),
                     f"AI agent reads untrusted event data with {reason}.",
@@ -345,7 +485,8 @@ def analyze_workflow(path: Path, display_path: str | None = None) -> list[Findin
                 next(iter(sorted(events & HIGH_TRUST_EVENTS)), "event"),
                 "Review indirect inputs, tools, and credential exposure. Use a read-only, "
                 "secret-free job and approve privileged actions separately."))
-        if _permission_is_write(job.get("permissions", doc.get("permissions"))):
+        if (not context or effective == "write") and _permission_is_write(
+                job.get("permissions", doc.get("permissions"))):
             p = job.get("permissions", doc.get("permissions"))
             if p == "write-all" or (isinstance(p, dict) and
                                     sum(_permission_is_write(v) for v in p.values()) >= 3):
@@ -355,6 +496,79 @@ def analyze_workflow(path: Path, display_path: str | None = None) -> list[Findin
                     "permissions", "Grant only the individual token scopes needed by "
                     "a separate output/publish job."))
     return sorted(set(findings), key=lambda x: (x.path, x.job, x.rule_id, x.evidence))
+
+
+LOCAL_WORKFLOW = re.compile(r"^\./\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)$")
+
+
+def _linked_findings(
+    files: dict[str, Path],
+    loaded: dict[str, tuple[str, dict[str, Any]]],
+) -> list[Finding]:
+    """Walk only pinned-in-tree local workflow edges, never remote 'uses'."""
+    documents = {name: artifact[1] for name, artifact in loaded.items()}
+    results: list[Finding] = []
+    calls_seen = 0
+
+    def visit(name: str, ctx: CallContext | None,
+              ancestry: tuple[str, ...]) -> None:
+        nonlocal calls_seen
+        if len(ancestry) >= MAX_LINK_DEPTH:
+            raise ScanError(f"Local workflow call depth exceeds {MAX_LINK_DEPTH}: {name}")
+        source = documents[name]
+        jobs = source.get("jobs", {})
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                raise ScanError(f"Job '{job_id}' must be a mapping in {files[name]}")
+            uses = job.get("uses")
+            if not isinstance(uses, str) or not uses.startswith("./.github/workflows/"):
+                continue
+            match = LOCAL_WORKFLOW.fullmatch(uses)
+            if not match:
+                raise ScanError(f"Invalid local workflow reference in {name}: {uses}")
+            callee = match.group(1)
+            if callee not in files:
+                raise ScanError(f"Local workflow target missing: {uses}")
+            if "workflow_call" not in _events(documents[callee]):
+                raise ScanError(f"Local workflow missing 'on: workflow_call': {callee}")
+            if callee in ancestry or callee == name:
+                raise ScanError(f"Local reusable workflow cycle: {' -> '.join(ancestry + (name, callee))}")
+            calls_seen += 1
+            if calls_seen > MAX_LINKED_CALLS:
+                raise ScanError(f"Local workflow calls exceed {MAX_LINKED_CALLS}")
+            origin = set(ctx.events) if ctx else _events(source)
+            in_values = job.get("with") or {}
+            if not isinstance(in_values, dict):
+                raise ScanError(f"Invalid caller inputs in {name}:{job_id}")
+            passed: dict[str, dict[str, str]] = {}
+            for key, value in in_values.items():
+                if isinstance(key, str):
+                    traced = _taint(_flat(value), {}, {}, inputs=ctx.inputs if ctx else None)
+                    if traced:
+                        passed[key.lower()] = {
+                            marker: f"{trace} -> {name}:{job_id}.with.{key}"
+                            for marker, trace in traced.items()
+                        }
+            secrets = job.get("secrets")
+            allows_secrets = (
+                bool(secrets) and (ctx is None or ctx.allows_secrets)
+            )
+            inherited = ctx.token_cap if ctx else "write"
+            cap = _token_cap(source, job, inherited)
+            route = f"{ctx.via} -> {name}:{job_id}" if ctx else f"{name}:{job_id}"
+            linked = CallContext(frozenset(origin), passed, cap, allows_secrets, route)
+            results.extend(analyze_workflow(files[callee],
+                                            f".github/workflows/{callee}",
+                                            context=linked,
+                                            loaded=loaded[callee]))
+            visit(callee, linked, ancestry + (name,))
+
+    for source_name in sorted(files):
+        # No implicit invocation on workflow_call-only entrypoints. Their
+        # actual caller may live outside this repo and is deliberately unknown.
+        if _events(documents[source_name]) != {"workflow_call"}:
+            visit(source_name, None, ())
+    return results
 
 
 def scan(target: Path) -> tuple[list[Finding], int]:
@@ -378,9 +592,14 @@ def scan(target: Path) -> tuple[list[Finding], int]:
     if len(candidates) > MAX_WORKFLOWS:
         raise ScanError(f"Too many workflows (>{MAX_WORKFLOWS})")
     findings: list[Finding] = []
+    loaded: dict[str, tuple[str, dict[str, Any]]] = {}
     for item in candidates:
         if item.is_symlink() or not item.resolve().is_relative_to(root.resolve()):
             raise ScanError(f"Refusing out-of-tree workflow: {item}")
-        findings.extend(analyze_workflow(item, str(item.relative_to(root))))
-    return sorted(findings, key=lambda x: (x.path, x.job, x.rule_id, x.evidence)), len(candidates)
+        document = _load_workflow(item)
+        loaded[item.name] = document
+        findings.extend(analyze_workflow(item, str(item.relative_to(root)), loaded=document))
+    if target.is_dir():
+        findings.extend(_linked_findings({item.name: item for item in candidates}, loaded))
+    return sorted(set(findings), key=lambda x: (x.path, x.job, x.rule_id, x.evidence)), len(candidates)
 
