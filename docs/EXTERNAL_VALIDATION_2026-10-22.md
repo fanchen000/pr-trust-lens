@@ -44,3 +44,38 @@ not 25 users, 23 vulnerabilities, or any external adoption.
 Security triage should follow GitHub's responsible disclosure procedures if a
 separate investigation eventually substantiates a vulnerability.
 
+## v0.3.0 expanded technical regression (maintainer-run)
+
+The earlier table is the actual v0.2.0 baseline and is intentionally
+preserved, not rewritten as if the old release detected PTL007.
+
+With v0.3.0, re-scanning the two previously pinned clones and adding the
+public [github/gh-aw](https://github.com/github/gh-aw) source snapshot at
+commit ab6db5d0e25aef034b81b5e847d59fcf14a8bf89 produced:
+
+| Public input | Workflow files | PTL002 | PTL004 | PTL005 | PTL007 | Total signals |
+|---|---:|---:|---:|---:|---:|---:|
+| anthropics/claude-code-action | 14 | 0 | 2 | 1 | 0 | 3 |
+| google-github-actions/run-gemini-cli | 11 | 16 | 0 | 8 | 16 | 40 |
+| github/gh-aw | 387 | 0 | 37 | 224 | 0 | 261 |
+| **Total** | **412** | **16** | **39** | **233** | **16** | **304** |
+
+PTL007 is a **new caller-to-callee dataflow signal**, not proof that any of
+these projects is insecure or that its defenses are bypassable. Overlapping
+PTL002 and PTL007 on a single workflow do not mean independent vulnerabilities.
+Most gh-aw results were low-severity, broad-write-scope PTL005 heuristics;
+the tool has **not** reviewed whether those permissions are justified. There
+are no measured true-positive precision/recall percentages for these
+third-party inputs, because no expert ground truth was established.
+
+### Bounded performance observation
+
+The new preflight-limited safe C YAML loader, where available, plus parsing
+once per file completed a directory scan of all 387 checked-out gh-aw
+workflows in **22.44 seconds on the maintainer's Windows Python 3.12 host**.
+A representative 325,032-byte generated workflow took approximately
+0.119 seconds with this implementation. Numbers are local observations,
+not hardware-independent throughput guarantees or a CI service-level claim.
+
+Independent users and contributors in this evaluation: **zero verified**.
+
