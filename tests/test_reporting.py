@@ -143,6 +143,21 @@ jobs:
         self.assertIn("./", [step.get("uses") for step in
                              doc["jobs"]["test"]["steps"]])
 
+    def test_dependency_maintenance_has_bounded_weekly_cadence(self):
+        root = Path(__file__).resolve().parents[1]
+        config = yaml.safe_load(
+            (root / ".github/dependabot.yml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(config["version"], 2)
+        self.assertEqual(
+            {entry["package-ecosystem"] for entry in config["updates"]},
+            {"pip", "github-actions"},
+        )
+        for entry in config["updates"]:
+            self.assertEqual(entry["directory"], "/")
+            self.assertEqual(entry["schedule"]["interval"], "weekly")
+            self.assertLessEqual(entry["open-pull-requests-limit"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
