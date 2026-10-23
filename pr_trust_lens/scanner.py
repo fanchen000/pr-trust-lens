@@ -39,6 +39,33 @@ UNTRUSTED_INPUTS = (
 )
 HIGH_TRUST_EVENTS = {"pull_request_target", "issue_comment", "workflow_run", "issues",
                      "pull_request_review", "pull_request_review_comment"}
+# Only these explicitly documented payload shapes are treated as proven
+# available. Unrecognized events are left undecided rather than assumed safe.
+# Ref: https://docs.github.com/en/webhooks/webhook-events-and-payloads
+EVENT_PAYLOAD_PREFIXES = {
+    "issues": ("github.event.issue.",),
+    "issue_comment": ("github.event.issue.", "github.event.comment."),
+    "pull_request": ("github.event.pull_request.",),
+    "pull_request_target": ("github.event.pull_request.",),
+    "pull_request_review": ("github.event.pull_request.", "github.event.review."),
+    "pull_request_review_comment": ("github.event.pull_request.", "github.event.comment."),
+    "push": (),
+    "schedule": (),
+    "workflow_dispatch": (),
+    "workflow_run": ("github.event.workflow_run.",),
+    "release": (),
+}
+
+
+def _source_available(marker: str, events: set[str]) -> bool:
+    """Reject *provably mismatched* event fields; retain unknown event shapes."""
+    if not events or any(event not in EVENT_PAYLOAD_PREFIXES for event in events):
+        return True
+    return any(
+        marker.startswith(prefix)
+        for event in events
+        for prefix in EVENT_PAYLOAD_PREFIXES[event]
+    )
 PR_HEAD_MARKERS = ("github.event.pull_request.head.sha",
                    "github.event.pull_request.head.ref",
                    "github.head_ref", "github.event.pull_request.head.repo")
@@ -130,7 +157,7 @@ class CallContext:
     events: frozenset[str]
     inputs: dict[str, dict[str, str]]
     token_cap: str  # write, read, or unknown; nested calls cannot elevate
-    allows_secrets: bool
+    passed_secrets: frozenset[str] | None  # None = inherit all; empty = none
     via: str
 
 
@@ -323,11 +350,51 @@ def _token_cap(doc: dict[str, Any], job: dict[str, Any],
     perms = job.get("permissions", doc.get("permissions"))
     if inherited == "read":
         return "read"
+    if inherited == "unknown":
+        return "read" if perms is not None and not _permission_is_write(perms) else "unknown"
+    if perms is None:
+        return inherited
     if perms is not None and not _permission_is_write(perms):
         return "read"
-    if inherited == "unknown" or perms is None:
-        return "unknown"
     return "write"
+
+
+def _passed_secrets(
+    raw: Any, upstream: frozenset[str] | None,
+) -> frozenset[str] | None:
+    """Propagate only explicitly allowed secret names through local calls.
+
+    None means an inherited wildcard, not an unknown permission grant. A
+    named mapping exposes the *target* secret name only when its source was
+    itself passed to the calling workflow (or this is the top-level caller).
+    """
+    if raw == "inherit":
+        return upstream
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, dict):
+        raise ScanError("Unsupported reusable-workflow secrets declaration")
+    names: set[str] = set()
+    for target, value in raw.items():
+        if not isinstance(target, str):
+            raise ScanError("Secret name must be a string")
+        for expression in ACTION_EXPR.findall(_flat(value)):
+            for reference in _expression_refs(expression):
+                prefix, _, original = reference.lower().partition("secrets.")
+                if not prefix and original and "." not in original:
+                    if upstream is None or original in upstream:
+                        names.add(target.lower())
+    return frozenset(names)
+
+
+def _secret_in_agent(value: str, allowed: frozenset[str] | None) -> bool:
+    for expression in ACTION_EXPR.findall(value):
+        for ref in _expression_refs(expression):
+            parts = ref.lower().split(".")
+            if len(parts) == 2 and parts[0] == "secrets":
+                if allowed is None or parts[1] in allowed:
+                    return True
+    return False
 
 
 def _line(text: str, evidence: str) -> int:
@@ -404,8 +471,8 @@ def analyze_workflow(path: Path, display_path: str | None = None,
             inherited_env = {"workflow_env": doc.get("env", {}), "job_env": job.get("env", {}),
                              "agents": [{"env": s.get("env"), "with": s.get("with"),
                                          "run": s.get("run")} for s in agent_steps]}
-            has_secret = context.allows_secrets and _expression_contains(
-                _flat(inherited_env), "secrets."
+            has_secret = _secret_in_agent(
+                _flat(inherited_env), context.passed_secrets
             )
             privileged = effective == "write" or has_secret
             reason = ("write-capable inherited GITHUB_TOKEN" if effective == "write" else
@@ -426,6 +493,10 @@ def analyze_workflow(path: Path, display_path: str | None = None,
                     input_sources[marker] = chain
             outputs.update(_step_outputs(step, job_env, outputs,
                                          inputs=context.inputs if context else None))
+        input_sources = {
+            marker: trace for marker, trace in input_sources.items()
+            if _source_available(marker, events)
+        }
         input_markers = sorted(input_sources)
         permissions_declared = ("permissions" in job or "permissions" in doc)
         for marker in input_markers:
@@ -550,14 +621,16 @@ def _linked_findings(
                             marker: f"{trace} -> {name}:{job_id}.with.{key}"
                             for marker, trace in traced.items()
                         }
-            secrets = job.get("secrets")
-            allows_secrets = (
-                bool(secrets) and (ctx is None or ctx.allows_secrets)
+            passed_secrets = _passed_secrets(
+                job.get("secrets"), ctx.passed_secrets if ctx else None
             )
             inherited = ctx.token_cap if ctx else "write"
             cap = _token_cap(source, job, inherited)
+            if ctx is None and ("permissions" not in source and
+                                "permissions" not in job):
+                cap = "unknown"
             route = f"{ctx.via} -> {name}:{job_id}" if ctx else f"{name}:{job_id}"
-            linked = CallContext(frozenset(origin), passed, cap, allows_secrets, route)
+            linked = CallContext(frozenset(origin), passed, cap, passed_secrets, route)
             results.extend(analyze_workflow(files[callee],
                                             f".github/workflows/{callee}",
                                             context=linked,

@@ -60,9 +60,23 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("PTL001", self.rules(workflow(
             event="pull_request_target", prompt="${{ github.event.pull_request.title }}")))
 
-    def test_high_risk_workflow_run_pr_body(self):
+    def test_workflow_run_does_not_invent_pull_request_body(self):
+        rules = self.rules(workflow(
+            event="workflow_run", prompt="${{ github.event.pull_request.body }}"))
+        self.assertNotIn("PTL001", rules)
+        self.assertIn("PTL004", rules)
+
+    def test_issue_comment_pr_fields_do_not_prove_direct_flow(self):
+        self.assertNotIn("PTL001", self.rules(workflow(
+            event="issue_comment", prompt="${{ github.event.pull_request.body }}")))
+
+    def test_multiple_events_retain_possible_issue_source(self):
         self.assertIn("PTL001", self.rules(workflow(
-            event="workflow_run", prompt="${{ github.event.pull_request.body }}")))
+            event="[push, issues]", prompt="${{ github.event.issue.body }}")))
+
+    def test_unknown_event_keeps_conservative_signal(self):
+        self.assertIn("PTL002", self.rules(workflow(
+            event="future_unknown_event", prompt="${{ github.event.issue.body }}")))
 
     def test_read_only_agent_has_no_high_finding(self):
         self.assertNotIn("PTL001", self.rules(workflow(permissions="contents: read")))

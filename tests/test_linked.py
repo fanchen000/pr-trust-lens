@@ -161,7 +161,8 @@ jobs:
         self.assertIn("trigger.yml:delegate", evidence[0])
 
     def test_non_privileged_event_is_medium(self):
-        self.add("trigger.yml", self.caller(event="push", supplied="${{ github.event.comment.body }}"))
+        self.add("trigger.yml", self.caller(event="pull_request",
+                                           supplied="${{ github.event.pull_request.body }}"))
         self.add("agent.yml", self.callee())
         linked = [x for x in self.findings() if x.rule_id == "PTL007"]
         self.assertEqual([f.severity for f in linked], ["medium"])
@@ -321,6 +322,83 @@ jobs:
         with: {prompt: "${{ inputs.question }}"}
 """)
         self.assertNotIn("PTL007", {x.rule_id for x in self.findings()})
+
+    def test_named_secret_target_mismatch_is_not_exposure(self):
+        self.add("trigger.yml", self.caller(
+            permission="contents: read",
+            secrets="    secrets: {VISIBLE: '${{ secrets.SOURCE }}'}\n"))
+        self.add("agent.yml", """on: workflow_call
+jobs:
+  agent:
+    permissions: {contents: read}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env: {TOKEN: "${{ secrets.NOT_VISIBLE }}"}
+        with: {prompt: "${{ inputs.question }}"}
+""")
+        self.assertNotIn("PTL007", {f.rule_id for f in self.findings()})
+
+    def test_named_secret_target_matches_agent_use(self):
+        self.add("trigger.yml", self.caller(
+            permission="contents: read",
+            secrets="    secrets: {VISIBLE: '${{ secrets.SOURCE }}'}\n"))
+        self.add("agent.yml", """on: workflow_call
+jobs:
+  agent:
+    permissions: {contents: read}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env: {TOKEN: "${{ secrets.VISIBLE }}"}
+        with: {prompt: "${{ inputs.question }}"}
+""")
+        flagged = [f for f in self.findings() if f.rule_id == "PTL007"]
+        self.assertEqual([f.severity for f in flagged], ["high"])
+        self.assertIn("secret", flagged[0].message)
+
+    def test_nested_unpassed_secret_does_not_get_elevated(self):
+        self.add("trigger.yml", self.caller(
+            permission="contents: read", destination="middle.yml",
+            secrets="    secrets: {PASS: '${{ secrets.ORIGINAL }}'}\n"))
+        self.add("middle.yml", """on: workflow_call
+jobs:
+  call:
+    uses: ./.github/workflows/agent.yml
+    with: {question: "${{ inputs.question }}"}
+    secrets: {UNRELATED: "${{ secrets.NOT_PASSED }}"}
+""")
+        self.add("agent.yml", """on: workflow_call
+jobs:
+  agent:
+    permissions: {contents: read}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env: {TOKEN: "${{ secrets.UNRELATED }}"}
+        with: {prompt: "${{ inputs.question }}"}
+""")
+        self.assertNotIn("PTL007", {f.rule_id for f in self.findings()})
+
+    def test_unknown_caller_permission_not_upgraded_by_callee(self):
+        self.add("trigger.yml", """on: issues
+jobs:
+  call:
+    uses: ./.github/workflows/agent.yml
+    with: {question: "${{ github.event.issue.body }}"}
+""")
+        self.add("agent.yml", self.callee(permission="contents: write"))
+        flagged = [f for f in self.findings() if f.rule_id == "PTL007"]
+        self.assertEqual([f.severity for f in flagged], ["medium"])
+
+    def test_explicit_caller_write_preserved_if_callee_omits_permissions(self):
+        self.add("trigger.yml", self.caller())
+        self.add("agent.yml", """on: workflow_call
+jobs:
+  agent:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ inputs.question }}"}
+""")
+        flagged = [f for f in self.findings() if f.rule_id == "PTL007"]
+        self.assertEqual([f.severity for f in flagged], ["high"])
 
     def test_bracket_workflow_call_input(self):
         self.add("trigger.yml", self.caller(supplied="${{ github['event']['comment']['body'] }}"))

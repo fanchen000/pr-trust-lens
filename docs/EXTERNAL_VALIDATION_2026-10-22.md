@@ -93,3 +93,25 @@ signals represent exploitable flaws, nor a independently validated
 false-positive-rate improvement. The previously published v0.2.0/v0.3.0
 snapshot results are preserved above rather than silently rewritten.
 
+## v0.5.0 compatibility recheck, 2026-10-23
+
+The same **previously pinned** local clones were rescanned after the
+event-payload and named-secret provenance corrections. This is a maintainer
+compatibility check, not newly observed upstream adoption or confirmed
+security issues.
+
+| Input at same pinned commit | Workflows | Signals | Breakdown |
+|---|---:|---:|---|
+| anthropics/claude-code-action | 14 | 3 | PTL004: 2; PTL005: 1 |
+| google-github-actions/run-gemini-cli | 11 | 24 | PTL005: 8; PTL007: 16 |
+| github/gh-aw | 387 | 261 | PTL004: 37; PTL005: 224 |
+| **Total** | **412** | **288** | All heuristic findings |
+
+The new protections are asserted in synthetic positive/negative tests, not
+claimed as newly discovered vulnerabilities in these upstream projects.
+The full gh-aw scan took approximately **46.47 seconds** on the maintainer's
+current Windows/Python run versus earlier local observations of about
+22.44 and 35.41 seconds. Timing varies substantially by environment and
+load; this is **not evidence of a speedup**, nor a statistically controlled
+performance comparison.
+

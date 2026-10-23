@@ -20,6 +20,8 @@ expected (rule ID, severity) pairs live in
 | Orphan local reusable workflow, no proven caller | No direct caller finding |
 | PR expression on an unrelated event with write token | PTL002 / MEDIUM, not asserted public reachability |
 | AI-agent job with 3 write scopes and no dangerous prompt | PTL005 / LOW |
+| Push event with nonexistent PR body payload | No finding |
+| Issue-comment event with nonexistent top-level PR body | PTL004 / MEDIUM advisory, not PTL001 |
 
 Reproduce using:
 
