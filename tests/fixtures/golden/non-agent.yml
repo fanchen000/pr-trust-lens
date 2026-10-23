@@ -1,0 +1,7 @@
+on: issues
+jobs:
+  helper:
+    permissions: {issues: write}
+    steps:
+      - uses: actions/github-script@v7
+        with: {script: "console.log('${{ github.event.issue.body }}')"}

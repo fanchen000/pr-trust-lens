@@ -1,12 +1,14 @@
 # PR Trust Lens
 
+[![Tests](https://github.com/fanchen000/pr-trust-lens/actions/workflows/ci.yml/badge.svg)](https://github.com/fanchen000/pr-trust-lens/actions/workflows/ci.yml)
+
 **An explainable, offline trust-boundary scanner for AI coding agents in GitHub Actions.**
 
 PR Trust Lens asks a narrow security question: *does a GitHub Actions job let a coding agent consume attacker-controlled PR or issue content while that job has write-capable tokens or secrets?*
 
 It prints a traceable finding, a workflow/line reference and a suggested separation of privileges. The scanner needs **no API keys, network, paid model, or repository permissions**. It never runs the code or Actions workflows it scans.
 
-> **Status:** v0.3.0, early-stage release. Static heuristic checks only; not a complete security audit, runtime sandbox, vulnerability proof, or security guarantee. Contributions, reproducible counterexamples and false-positive reports are welcome.
+> **Status:** v0.4.0, early-stage release. Static heuristic checks only; not a complete security audit, runtime sandbox, vulnerability proof, or security guarantee. Contributions, reproducible counterexamples and false-positive reports are welcome.
 
 ## Why this exists
 
@@ -15,6 +17,33 @@ Coding agents are increasingly embedded in PR review, issue triage and release a
 PR Trust Lens is **not** a generic replacement for [zizmor](https://github.com/zizmorcore/zizmor), [actionlint](https://github.com/rhysd/actionlint), CodeQL or the OpenSSF Scorecard. They already do substantial general workflow/security analysis. Our focused extra lens is to identify a joint pattern involving **AI-agent invocation + untrusted GitHub event expressions + job privileges**, and to explain that trust path in familiar CI terms.
 
 ## Install and run
+
+**Minimal GitHub Actions integration** (requires no secret or privileged token):
+
+```yaml
+name: AI workflow trust check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: fanchen000/pr-trust-lens@v0.4.0 # replace tag with 40-char SHA for production
+        with:
+          path: .
+          fail-on: high
+          format: github
+```
+
+The composite action executes locally in the runner and produces inline
+GitHub annotations. It performs dependency installation via pip, so your
+runner needs PyPI connectivity during setup; **the scanner itself operates
+offline**. No GitHub token or OpenAI API key is required. See
+[CI integration and supply-chain guidance](docs/INTEGRATION.md).
 
 Python 3.10+ and pip:
 
@@ -66,7 +95,7 @@ Every finding exposes a **rule ID, severity, relative file path, best-effort lin
     python -m pip install -e .
     pr-trust-lens scan . --fail-on high
 
-Exit codes: 0 = no findings meeting the threshold; 1 = one or more findings meeting the threshold; 2 = parse/path/input error. Use --fail-on none for discovery mode, or low/medium/high to enforce a policy. SARIF 2.1.0 output is available with --format sarif for consumption by compatible tools.
+Exit codes: 0 = no findings meeting the threshold; 1 = one or more findings meeting the threshold; 2 = parse/path/input error. Use --fail-on none for discovery mode, or low/medium/high to enforce a policy. SARIF 2.1.0 output (`--format sarif`) includes stable per-finding fingerprints for code-scanning consumers. For inline GitHub annotations, use `--format github`; it emits runner commands with escaped untrusted text, not a generic log.
 
 Our own CI is least-privilege and runs on every PR. We intentionally do not publish comments back into PRs automatically.
 
@@ -74,7 +103,7 @@ Our own CI is least-privilege and runs on every PR. We intentionally do not publ
 
 **In scope:** a repository maintainer wants an offline review of the static permissions and prompt dataflow of selected GitHub Actions AI-agent jobs. The workflow YAML is treated as untrusted input and parsed with a bounded, safe PyYAML loader (C-accelerated when available). No templates, shell scripts or actions are executed.
 
-**Out of scope:** proving exploitation; exhaustively following shell variables, artifacts, third-party actions or remote/external reusable workflows; discovering hidden default GitHub permissions from repository settings; runtime token access; secrets exposure across containers; prompt-injection detection in model responses; remote workflow downloads; identifying every coding agent. Dataflow across arbitrary shell commands, branch conditions, multi-line output syntax, composite actions and artifact uploads is **not supported**. Conditional guards and authorization checks are not evaluated. Some indirect dataflows are **not detected** and legitimate intended uses may trigger warnings. Results are conservative signals for review, not a correctness or security certification.
+**Out of scope:** proving exploitation; exhaustively following shell variables, artifacts, third-party actions or remote/external reusable workflows; discovering hidden default GitHub permissions from repository settings; runtime token access; secrets exposure across containers; prompt-injection detection in model responses; remote workflow downloads; identifying every coding agent. Dataflow across arbitrary shell commands, branch conditions, multi-line output syntax, composite actions and artifact uploads is **not supported**. Conditional guards and authorization checks are not evaluated. Standalone `workflow_call` files **do not** establish public attacker reachability, and their caller-unverified prompt patterns are not escalated as PTL002. Some indirect dataflows are **not detected** and legitimate intended uses may trigger warnings. Results are conservative signals for review, not a correctness or security certification.
 
 Recommended controls, beyond this tool: isolate untrusted inputs from secrets, grant minimum explicit GITHUB_TOKEN permissions, pin third-party actions, prevent untrusted PR code execution in privileged contexts, and require human approval or validated safe outputs for high-impact actions. Run a general-purpose Actions security scanner alongside this tool.
 
@@ -85,6 +114,10 @@ Recommended controls, beyond this tool: isolate untrusted inputs from secrets, g
     python -m pr_trust_lens scan examples/unsafe-ai-pr.yml --fail-on none
 
 All tests use local synthetic workflows and no accounts or credentials. Security reports: see [SECURITY.md](SECURITY.md). Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+We maintain a [small explicitly labeled synthetic golden benchmark](docs/GOLDEN_BENCHMARK.md).
+Passing it is evidence of regression prevention on the fixtures, **not a
+real-world precision/recall score**.
 
 See our [pinned public-source validation](docs/EXTERNAL_VALIDATION_2026-10-22.md)
 and [honest community/adoption accounting](docs/COMMUNITY_AND_ADOPTION.md).

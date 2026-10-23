@@ -106,6 +106,42 @@ jobs:
         self.add("agent.yml", self.callee())
         self.assertNotIn("PTL007", {x.rule_id for x in self.findings()})
 
+    def test_orphan_reusable_workflow_must_not_invent_caller_event(self):
+        self.add("agent.yml", """on: workflow_call
+jobs:
+  agent:
+    permissions: {contents: write}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ github.event.comment.body }}"}
+""")
+        self.assertNotIn("PTL002", {f.rule_id for f in self.findings()})
+
+    def test_explicit_local_caller_traces_without_double_report(self):
+        self.add("trigger.yml", self.caller())
+        self.add("agent.yml", """on: workflow_call
+jobs:
+  agent:
+    permissions: {contents: write}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ github.event.comment.body }}"}
+""")
+        rules = {f.rule_id for f in self.findings()}
+        self.assertIn("PTL007", rules)
+        self.assertNotIn("PTL002", rules)
+
+    def test_mixed_push_and_workflow_call_still_has_direct_signal(self):
+        path = self.add("mixed.yml", """on: [push, workflow_call]
+jobs:
+  agent:
+    permissions: {contents: write}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ github.event.pull_request.body }}"}
+""")
+        self.assertIn("PTL002", {f.rule_id for f in analyze_workflow(path)})
+
     def test_nested_two_hop_path(self):
         self.add("trigger.yml", self.caller(destination="middle.yml"))
         self.add("middle.yml", """on:

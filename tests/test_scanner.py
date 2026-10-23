@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pr_trust_lens.cli import main, sarif
 from pr_trust_lens.scanner import ScanError, analyze_workflow, scan
@@ -339,6 +340,14 @@ jobs:
             self.skipTest("symlink creation not permitted by OS")
         with self.assertRaises(ScanError):
             scan(self.yaml)
+
+    def test_total_repository_size_limit_fails_closed(self):
+        folder = self.root / ".github" / "workflows"
+        folder.mkdir(parents=True)
+        (folder / "one.yml").write_text(workflow(), encoding="utf-8")
+        with patch("pr_trust_lens.scanner.MAX_REPOSITORY_BYTES", 10):
+            with self.assertRaisesRegex(ScanError, "total size limit"):
+                scan(self.root)
 
 
 if __name__ == "__main__":

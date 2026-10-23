@@ -1,0 +1,6 @@
+on: issues
+jobs:
+  agent:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ github.event.issue.body }}"}
