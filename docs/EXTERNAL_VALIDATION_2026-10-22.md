@@ -79,3 +79,17 @@ not hardware-independent throughput guarantees or a CI service-level claim.
 
 Independent users and contributors in this evaluation: **zero verified**.
 
+## v0.4.0 duplicate-caller finding correction
+
+The same pinned 11-workflow google-github-actions/run-gemini-cli snapshot
+now yields 16 PTL007 linked-call source traces and 8 broad-permission
+PTL005 signals: **24 signals instead of 40**. The 16 removed PTL002
+entries were unsupported assumptions about stand-alone workflow_call
+entrypoints, duplicating PTL007 across known local callers.
+
+This is a measured removal of unsupported, duplicate findings in this
+particular public snapshot. It is **not** a claim that the remaining
+signals represent exploitable flaws, nor a independently validated
+false-positive-rate improvement. The previously published v0.2.0/v0.3.0
+snapshot results are preserved above rather than silently rewritten.
+

@@ -24,3 +24,9 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Scan this repository
         run: python3 -m pr_trust_lens scan . --fail-on high
+      - name: Dogfood published composite-action interface
+        uses: ./
+        with:
+          path: .
+          fail-on: high
+          format: github

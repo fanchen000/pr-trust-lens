@@ -1,0 +1,32 @@
+name: PR Trust Lens
+description: Offline AI-agent trust-boundary analysis for GitHub Actions workflows
+author: PR Trust Lens contributors
+inputs:
+  path:
+    description: Repository root or single GitHub Actions workflow to scan
+    required: false
+    default: .
+  fail-on:
+    description: Minimum severity that fails the job (high, medium, low, none)
+    required: false
+    default: high
+  format:
+    description: Output format (github, human, json, sarif)
+    required: false
+    default: github
+runs:
+  using: composite
+  steps:
+    - name: Install offline scanner
+      shell: bash
+      run: python3 -m pip install "$GITHUB_ACTION_PATH"
+    - name: Analyze workflow trust boundaries
+      shell: bash
+      env:
+        PTL_SCAN_PATH: ${{ inputs.path }}
+        PTL_FAIL_ON: ${{ inputs.fail-on }}
+        PTL_FORMAT: ${{ inputs.format }}
+      run: python3 -m pr_trust_lens scan "$PTL_SCAN_PATH" --fail-on "$PTL_FAIL_ON" --format "$PTL_FORMAT"
+branding:
+  icon: shield
+  color: blue

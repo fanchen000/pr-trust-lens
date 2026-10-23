@@ -1,0 +1,7 @@
+on: issue_comment
+jobs:
+  agent:
+    permissions: {contents: read}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with: {prompt: "${{ github.event.comment.body }}"}

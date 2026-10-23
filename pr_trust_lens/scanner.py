@@ -11,6 +11,7 @@ import yaml
 
 MAX_WORKFLOW_BYTES = 2_000_000
 MAX_WORKFLOWS = 1_000
+MAX_REPOSITORY_BYTES = 128_000_000
 MAX_LINKED_CALLS = 200
 MAX_LINK_DEPTH = 8
 
@@ -449,7 +450,7 @@ def analyze_workflow(path: Path, display_path: str | None = None,
                     "Move the AI step to a read-only, secret-free job; use an "
                     "isolated downstream job with explicitly validated safe outputs.",
                     location_hint=marker))
-            elif privileged:
+            elif privileged and events != {"workflow_call"}:
                 findings.append(_finding(
                     "PTL002", "medium", display, text, str(job_id),
                     f"AI agent receives event-controlled data with {reason}; verify fork restrictions.",
@@ -591,6 +592,14 @@ def scan(target: Path) -> tuple[list[Finding], int]:
         raise ScanError(f"Unsupported path: {target}")
     if len(candidates) > MAX_WORKFLOWS:
         raise ScanError(f"Too many workflows (>{MAX_WORKFLOWS})")
+    # Prevent accidental multi-gigabyte allocations for malicious/broken repos.
+    # This bound still accommodates large generated-workflow repositories.
+    try:
+        total_bytes = sum(item.stat().st_size for item in candidates)
+    except OSError as exc:
+        raise ScanError(f"Unable to stat workflow: {exc}") from exc
+    if total_bytes > MAX_REPOSITORY_BYTES:
+        raise ScanError(f"Workflow files exceed total size limit ({MAX_REPOSITORY_BYTES} bytes)")
     findings: list[Finding] = []
     loaded: dict[str, tuple[str, dict[str, Any]]] = {}
     for item in candidates:

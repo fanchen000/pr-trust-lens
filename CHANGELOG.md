@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 (2026-10-23)
+
+- Release a **GitHub composite action**, dogfooded in public CI on Python
+  3.10, 3.12 and 3.13, without requiring users to copy the scanner source.
+- Support `--format github` with native GitHub error/warning/notice
+  annotations. Escape workflow-command properties and data correctly.
+  Sanitize adversarial control characters in human output and CLI errors.
+- Emit stable versioned SARIF partial fingerprints and fixed rule titles so
+  code-scanning consumers can correlate repeat findings across runs.
+- **Precision fix:** do not invent a caller context for an orphan
+  `workflow_call` entrypoint. Retain PTL007 for proven local caller routes.
+  A pinned run-gemini-cli snapshot drops 16 duplicate PTL002 signals while
+  retaining 16 caller-path PTL007 signals. Neither count is a vulnerability claim.
+- Introduce a synthetic golden accuracy corpus with explicit positive and
+  negative expectations, plus runner-command injection regression tests.
+- Add a 128 MB aggregate workflow-input guard to bound repository scans.
+- Keep offline execution, zero API tokens and no remote downloads at runtime.
+
 ## 0.3.0 (2026-10-22)
 
 - Add **PTL007**: bounded source-to-sink provenance across explicitly local
