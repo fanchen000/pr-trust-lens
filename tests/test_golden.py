@@ -18,6 +18,8 @@ GOLDEN = {
     "orphan-reusable.yml": [],
     "other-event.yml": [("PTL002", "medium")],
     "broad-write.yml": [("PTL005", "low")],
+    "mismatched-push-payload.yml": [],
+    "mismatched-comment-payload.yml": [("PTL004", "medium")],
 }
 
 

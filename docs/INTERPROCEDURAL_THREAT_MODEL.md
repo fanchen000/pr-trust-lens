@@ -24,7 +24,16 @@ The caller token permission acts as a ceiling: a read-only caller cannot
 become write-capable because the callee requests write. No permissions
 declaration means **unknown**, not proven write. A callee reference to a
 secret is not counted as caller-secret exposure if the caller did not
-explicitly pass/inherit secrets.
+explicitly pass/inherit secrets. Since v0.5.0, the checker also compares
+the actual target secret name with the set of names explicitly passed to
+the callee (or an inherited wildcard); unrelated secret names do not
+prove exposure. Named secrets stay scoped across nested calls.
+
+The scanner also checks known GitHub event payload paths against their
+declared trigger. A push-only event does not provide PR body data. For
+unrecognized event types it deliberately retains the source as uncertain
+instead of treating unfamiliar schemas as safe. These are static source
+checks, not evaluation of workflow if-guards or event authenticity.
 
 ## Scope and performance limits
 

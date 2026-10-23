@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 (2026-10-23)
+
+- **Reduce impossible-source warnings**: compare event payload source paths
+  with the declared trigger (e.g. a push event does not carry PR body).
+  For unrecognized/custom event types, the scanner remains conservative
+  and does not assert the source is absent. Multi-trigger workflows retain
+  any compatible source path.
+- **Track explicitly passed secret identities across local workflow calls**:
+  a named secret exposed to the callee does not imply other secret names
+  are available. Support inherited and renamed secrets across nested calls,
+  without implicitly exposing names absent from the caller's scope.
+- Improve effective token ceiling propagation: an undeclared caller default
+  is **unknown**, an explicit read-only caller remains read-only, and an
+  explicit write-capable caller remains potentially writable when a callee
+  does not reduce its token permissions.
+- Expand offline regression coverage to 88 unit tests and 10 independent
+  synthetic golden cases; run pinned public-source compatibility scans.
+- No claim of verified exploitability, independent adoption or real-world
+  precision/recall. The scanner still does not interpret job authorization
+  guards, dynamic payloads or unrecognized event schemas.
+
 ## 0.4.0 (2026-10-23)
 
 - Release a **GitHub composite action**, dogfooded in public CI on Python
