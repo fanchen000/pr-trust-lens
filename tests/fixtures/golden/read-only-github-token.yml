@@ -1,0 +1,10 @@
+on: issue_comment
+jobs:
+  agent:
+    permissions: {contents: read}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        with:
+          prompt: "${{ github.event.comment.body }}"

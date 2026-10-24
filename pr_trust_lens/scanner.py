@@ -70,6 +70,7 @@ PR_HEAD_MARKERS = ("github.event.pull_request.head.sha",
                    "github.event.pull_request.head.ref",
                    "github.head_ref", "github.event.pull_request.head.repo")
 WRITE_PERMISSIONS = {"write", "write-all"}
+ALL_WRITE_SCOPES = frozenset({"*"})
 ACTION_EXPR = re.compile(r"\$\{\{\s*(.*?)\s*\}\}", re.DOTALL)
 ROOT_REF = re.compile(r"(?:github|env|steps|inputs|secrets)\b", re.I)
 DOT_REF = re.compile(r"\.([A-Za-z_][A-Za-z0-9_-]*)")
@@ -156,7 +157,7 @@ class CallContext:
 
     events: frozenset[str]
     inputs: dict[str, dict[str, str]]
-    token_cap: str  # write, read, or unknown; nested calls cannot elevate
+    token_cap: frozenset[str] | None  # specific write scopes, or unknown
     passed_secrets: frozenset[str] | None  # None = inherit all; empty = none
     via: str
 
@@ -339,24 +340,53 @@ def _job_privilege(doc: dict[str, Any], job: dict[str, Any],
     materialized = {"workflow_env": doc.get("env", {}), "job_env": job.get("env", {}),
                     "agents": [{"env": s.get("env"), "with": s.get("with"),
                                 "run": s.get("run")} for s in agent_steps]}
-    if _expression_contains(_flat(materialized), "secrets."):
+    if _secret_in_agent(_flat(materialized), None):
         return True, "secret reference in the agent or inherited environment"
     return False, "no explicit write token or secret detected"
 
 
-def _token_cap(doc: dict[str, Any], job: dict[str, Any],
-               inherited: str = "write") -> str:
-    """Conservatively model GitHub reusable-workflow token permission ceilings."""
+def _requested_write_scopes(value: Any) -> frozenset[str]:
+    """A declared permissions mapping sets all omitted scopes to none."""
+    if isinstance(value, str):
+        return ALL_WRITE_SCOPES if value.strip().lower() == "write-all" else frozenset()
+    if isinstance(value, dict):
+        return frozenset(
+            str(key).lower() for key, level in value.items()
+            if _permission_is_write(level)
+        )
+    return frozenset()
+
+
+def _token_cap(
+    doc: dict[str, Any],
+    job: dict[str, Any],
+    inherited: frozenset[str] | None = ALL_WRITE_SCOPES,
+) -> frozenset[str] | None:
+    """Intersect actual write scopes across each reusable-workflow boundary.
+
+    None means the ancestor's repo default permission is unknown. A downstream
+    explicit read-only declaration resolves this uncertainty to no write scopes;
+    a downstream write request never establishes writes absent upstream.
+    """
     perms = job.get("permissions", doc.get("permissions"))
-    if inherited == "read":
-        return "read"
-    if inherited == "unknown":
-        return "read" if perms is not None and not _permission_is_write(perms) else "unknown"
     if perms is None:
         return inherited
-    if perms is not None and not _permission_is_write(perms):
-        return "read"
-    return "write"
+    requested = _requested_write_scopes(perms)
+    if not requested:
+        return frozenset()
+    if inherited is None:
+        return None
+    if "*" in inherited:
+        return requested
+    if "*" in requested:
+        return inherited
+    return inherited & requested
+
+
+def _cap_status(cap: frozenset[str] | None) -> str:
+    if cap is None:
+        return "unknown"
+    return "write" if cap else "read"
 
 
 def _passed_secrets(
@@ -391,7 +421,9 @@ def _secret_in_agent(value: str, allowed: frozenset[str] | None) -> bool:
     for expression in ACTION_EXPR.findall(value):
         for ref in _expression_refs(expression):
             parts = ref.lower().split(".")
-            if len(parts) == 2 and parts[0] == "secrets":
+            # secrets.GITHUB_TOKEN is the same capped GITHUB_TOKEN, not an
+            # independent secret that restores write access to a read-only job.
+            if len(parts) == 2 and parts[0] == "secrets" and parts[1] != "github_token":
                 if allowed is None or parts[1] in allowed:
                     return True
     return False
@@ -465,8 +497,8 @@ def analyze_workflow(path: Path, display_path: str | None = None,
         if not agent_steps:
             continue  # This scanner is intentionally AI-agent-specific.
         privileged, reason = _job_privilege(doc, job, agent_steps)
-        effective = (_token_cap(doc, job, context.token_cap) if context else
-                     _token_cap(doc, job, "unknown"))
+        effective = _cap_status(_token_cap(
+            doc, job, context.token_cap if context else None))
         if context:
             inherited_env = {"workflow_env": doc.get("env", {}), "job_env": job.get("env", {}),
                              "agents": [{"env": s.get("env"), "with": s.get("with"),
@@ -557,16 +589,20 @@ def analyze_workflow(path: Path, display_path: str | None = None,
                 next(iter(sorted(events & HIGH_TRUST_EVENTS)), "event"),
                 "Review indirect inputs, tools, and credential exposure. Use a read-only, "
                 "secret-free job and approve privileged actions separately."))
-        if (not context or effective == "write") and _permission_is_write(
-                job.get("permissions", doc.get("permissions"))):
-            p = job.get("permissions", doc.get("permissions"))
-            if p == "write-all" or (isinstance(p, dict) and
-                                    sum(_permission_is_write(v) for v in p.values()) >= 3):
-                findings.append(_finding(
-                    "PTL005", "low", display, text, str(job_id),
-                    "AI agent job grants broadly scoped GITHUB_TOKEN write permissions.",
-                    "permissions", "Grant only the individual token scopes needed by "
-                    "a separate output/publish job."))
+        p = job.get("permissions", doc.get("permissions"))
+        if context:
+            granted = _token_cap(doc, job, context.token_cap)
+            broad_write = (granted is not None and
+                           ("*" in granted or len(granted) >= 3))
+        else:
+            granted = _requested_write_scopes(p)
+            broad_write = "*" in granted or len(granted) >= 3
+        if broad_write:
+            findings.append(_finding(
+                "PTL005", "low", display, text, str(job_id),
+                "AI agent job grants broadly scoped GITHUB_TOKEN write permissions.",
+                "permissions", "Grant only the individual token scopes needed by "
+                "a separate output/publish job."))
     return sorted(set(findings), key=lambda x: (x.path, x.job, x.rule_id, x.evidence))
 
 
@@ -624,11 +660,11 @@ def _linked_findings(
             passed_secrets = _passed_secrets(
                 job.get("secrets"), ctx.passed_secrets if ctx else None
             )
-            inherited = ctx.token_cap if ctx else "write"
+            inherited = ctx.token_cap if ctx else ALL_WRITE_SCOPES
             cap = _token_cap(source, job, inherited)
             if ctx is None and ("permissions" not in source and
                                 "permissions" not in job):
-                cap = "unknown"
+                cap = None
             route = f"{ctx.via} -> {name}:{job_id}" if ctx else f"{name}:{job_id}"
             linked = CallContext(frozenset(origin), passed, cap, passed_secrets, route)
             results.extend(analyze_workflow(files[callee],

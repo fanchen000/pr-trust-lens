@@ -12,6 +12,7 @@ from pr_trust_lens.scanner import analyze_workflow
 GOLDEN = {
     "direct-privileged.yml": [("PTL001", "high")],
     "read-only.yml": [],
+    "read-only-github-token.yml": [],
     "unknown-permissions.yml": [("PTL006", "medium")],
     "non-agent.yml": [],
     "quoted-marker.yml": [("PTL004", "medium")],

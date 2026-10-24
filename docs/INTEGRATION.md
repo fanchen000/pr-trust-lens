@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: fanchen000/pr-trust-lens@v0.5.0
+      - uses: fanchen000/pr-trust-lens@v0.6.0
         with:
           path: .
           format: github
@@ -29,7 +29,7 @@ jobs:
 ~~~
 
 **Pin the PR Trust Lens action to the full 40-character SHA of its tested
-v0.5.0 release in production.** Moving tags are less robust than immutable
+v0.6.0 release in production.** Moving tags are less robust than immutable
 commit pins. Do not give the audit workflow an API key or write token.
 
 The scanner reads the repository-root workflow directory or a single

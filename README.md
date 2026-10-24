@@ -8,7 +8,7 @@ PR Trust Lens asks a narrow security question: *does a GitHub Actions job let a 
 
 It prints a traceable finding, a workflow/line reference and a suggested separation of privileges. The scanner needs **no API keys, network, paid model, or repository permissions**. It never runs the code or Actions workflows it scans.
 
-> **Status:** v0.5.0, early-stage release. Static heuristic checks only; not a complete security audit, runtime sandbox, vulnerability proof, or security guarantee. Contributions, reproducible counterexamples and false-positive reports are welcome.
+> **Status:** v0.6.0, early-stage release. Static heuristic checks only; not a complete security audit, runtime sandbox, vulnerability proof, or security guarantee. Contributions, reproducible counterexamples and false-positive reports are welcome.
 
 ## Why this exists
 
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: fanchen000/pr-trust-lens@v0.5.0 # replace tag with 40-char SHA for production
+      - uses: fanchen000/pr-trust-lens@v0.6.0 # replace tag with 40-char SHA for production
         with:
           path: .
           fail-on: high
@@ -91,6 +91,13 @@ In v0.5.0, event-source compatibility excludes provably mismatched fields
 analysis also tracks **which named secrets were passed**, not merely whether
 some secrets might exist. Unknown event shapes and token defaults remain
 unknown rather than being assumed safe.
+
+In v0.6.0, cross-workflow token permission ceilings are tracked per
+individual scope rather than as one coarse write/read bit, following
+GitHub's rule that nested reusable workflows cannot elevate the
+caller's permissions. A read-only built-in GITHUB_TOKEN is not treated
+as an unrelated high-privilege secret. This is a static approximation,
+not runtime token introspection.
 
 Built-in agent signals include recognizable invocations of Codex, Claude Code Action/CLI, Gemini CLI, OpenCode and GitHub Agentic Workflows. Missing or renamed patterns will be missed. A step is identified by its action name or command; mere mention of an agent in a documentation string is not sufficient.
 
