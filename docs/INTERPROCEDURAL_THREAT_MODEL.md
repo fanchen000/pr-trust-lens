@@ -29,6 +29,14 @@ the actual target secret name with the set of names explicitly passed to
 the callee (or an inherited wildcard); unrelated secret names do not
 prove exposure. Named secrets stay scoped across nested calls.
 
+Since v0.6.0, the caller GITHUB_TOKEN write ceiling is represented as a
+set of granted **named write scopes** (or unknown). At every linked call,
+explicit requested scopes are intersected with the current ceiling.
+Write-all preserves the upstream ceiling but never elevates a narrow one;
+an omitted permissions key preserves known inherited scopes, whereas an
+undeclared ancestor default is unknown. The built-in
+secrets.GITHUB_TOKEN is not counted as another, unconstrained credential.
+
 The scanner also checks known GitHub event payload paths against their
 declared trigger. A push-only event does not provide PR body data. For
 unrecognized event types it deliberately retains the source as uncertain

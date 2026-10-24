@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0 (2026-10-24)
+
+- **Correct scope-specific GITHUB_TOKEN propagation**: write privileges in
+  local reusable-workflow chains are now intersected by *named permission
+  scope*, rather than reduced to an overly broad write/read boolean. For
+  example, issues:write in the caller cannot grant contents:write in its
+  callee. Any undeclared ancestor default remains unknown, not write.
+- **Do not mistake the built-in secrets.GITHUB_TOKEN for an independent
+  secret**. Its effective rights still obey the same write scope ceiling.
+  Explicitly passed other secrets retain their separate risk signals.
+- Avoid mischaracterizing a *known* restricted caller's inherited scopes as
+  broad write access; a standalone reusable workflow's declared broad scope
+  remains a separate advisory because external caller scope is unverified.
+- Add negative and positive regression cases for disjoint, overlapping,
+  wildcard, unknown and nested write permissions, plus GitHub token and
+  unrelated secret cases.
+- Offline tests: 96. Curated synthetic golden files: 11. Neither the unit
+  suite nor maintainer-run scans measures true real-world precision or recall.
+
 ## 0.5.0 (2026-10-23)
 
 - **Reduce impossible-source warnings**: compare event payload source paths

@@ -115,3 +115,27 @@ current Windows/Python run versus earlier local observations of about
 load; this is **not evidence of a speedup**, nor a statistically controlled
 performance comparison.
 
+## v0.6.0 per-scope token-ceiling regression, 2026-10-24
+
+The scanner was run again on the **same pinned checkouts**, following a
+specific correctness fix: do not treat unrelated write permission scopes
+as interchangeable across a local reusable-workflow call.
+
+| Public input | Workflows | Heuristic signals | Breakdown |
+|---|---:|---:|---|
+| anthropics/claude-code-action | 14 | 3 | PTL004: 2; PTL005: 1 |
+| google-github-actions/run-gemini-cli | 11 | 24 | PTL005: 8; PTL007: 16 |
+| github/gh-aw | 387 | 261 | PTL004: 37; PTL005: 224 |
+| **Total** | **412** | **288** | Not verified vulnerabilities |
+
+The upstream counts did **not** change: the defect and fix are supported by
+new isolated positive/negative tests, including disjoint issues/contents
+write scopes, write-all, multi-hop calls and a read-only built-in
+GITHUB_TOKEN. A snapshot's unchanged result count is **not** proof of
+perfect detection or zero regressions in other projects.
+
+The 387-workflow gh-aw scan took **19.25 seconds** in this local run.
+Wall-clock variation across prior runs was substantial; no performance
+improvement is claimed from this security fix. There is no verified
+external adoption or independent ground-truth accuracy assessment.
+

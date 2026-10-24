@@ -279,6 +279,14 @@ jobs:
     def test_explicit_read_only_is_not_unknown(self):
         self.assertNotIn("PTL006", self.rules(workflow(permissions="contents: read")))
 
+    def test_readonly_github_token_is_not_unrelated_secret_escalation(self):
+        source = workflow(permissions="contents: read",
+                          prompt="${{ github.event.comment.body }}")
+        source = source.replace("        with:\n",
+                                "        env: {TOKEN: '${{ secrets.GITHUB_TOKEN }}'}\n"
+                                "        with:\n")
+        self.assertNotIn("PTL001", self.rules(source))
+
     def test_duplicate_top_level_permissions_rejected(self):
         with self.assertRaises(ScanError):
             self.findings("on: issues\npermissions: {contents: read}\npermissions: {contents: write}\njobs: {}\n")

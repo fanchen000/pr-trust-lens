@@ -14,6 +14,7 @@ expected (rule ID, severity) pairs live in
 |---|---|
 | Direct issue comment, write token, AI-agent prompt | PTL001 / HIGH |
 | Same issue comment, explicit read-only job | No finding |
+| Read-only job explicitly uses built-in secrets.GITHUB_TOKEN | No independent secret escalation |
 | Public issue prompt, token permissions undeclared | PTL006 / MEDIUM |
 | Privileged non-agent workflow | No finding |
 | A dangerous-looking string literal in an Actions expression | PTL004 / MEDIUM advisory, **not** PTL001 |

@@ -400,6 +400,77 @@ jobs:
         flagged = [f for f in self.findings() if f.rule_id == "PTL007"]
         self.assertEqual([f.severity for f in flagged], ["high"])
 
+    def test_disjoint_write_scopes_do_not_elevate_callee(self):
+        self.add("trigger.yml", self.caller(permission="issues: write"))
+        self.add("agent.yml", self.callee(permission="contents: write"))
+        rules = {f.rule_id for f in self.findings()}
+        self.assertNotIn("PTL007", rules)
+        self.assertNotIn("PTL005", rules)
+
+    def test_matching_write_scope_survives_callee(self):
+        self.add("trigger.yml", self.caller(permission="issues: write"))
+        self.add("agent.yml", self.callee(permission="issues: write"))
+        flagged = [f for f in self.findings() if f.rule_id == "PTL007"]
+        self.assertEqual([f.severity for f in flagged], ["high"])
+
+    def test_write_all_caller_can_grant_specific_scope(self):
+        src = self.caller()
+        self.add("trigger.yml", src.replace("permissions:\n  contents: write",
+                                             "permissions: write-all"))
+        self.add("agent.yml", self.callee(permission="contents: write"))
+        flagged = [f for f in self.findings() if f.rule_id == "PTL007"]
+        self.assertEqual([f.severity for f in flagged], ["high"])
+
+    def test_nested_scope_downgrade_is_irreversible(self):
+        self.add("trigger.yml", self.caller(permission="issues: write",
+                                           destination="middle.yml"))
+        self.add("middle.yml", """on: workflow_call
+permissions: {issues: write}
+jobs:
+  relay:
+    uses: ./.github/workflows/agent.yml
+    permissions: {contents: write}
+    with: {question: "${{ inputs.question }}"}
+""")
+        self.add("agent.yml", self.callee(permission="contents: write"))
+        self.assertNotIn("PTL007", {f.rule_id for f in self.findings()})
+
+    def test_unknown_parent_stays_unknown_even_if_callee_requests_write(self):
+        self.add("trigger.yml", """on: issues
+jobs:
+  relay:
+    uses: ./.github/workflows/agent.yml
+    with: {question: "${{ github.event.issue.body }}"}
+""")
+        self.add("agent.yml", self.callee(permission="contents: write"))
+        linked = [f for f in self.findings() if f.rule_id == "PTL007"]
+        self.assertEqual([f.severity for f in linked], ["medium"])
+
+    def test_narrow_caller_scope_not_broad_write_in_callee(self):
+        self.add("trigger.yml", self.caller(permission="issues: write"))
+        self.add("agent.yml", self.callee(
+            permission="contents: write\n      issues: write\n      checks: write"))
+        results = self.findings()
+        linked = [f for f in results if f.rule_id == "PTL007"]
+        self.assertEqual([f.severity for f in linked], ["high"])
+        # Standalone reusable-workflow scopes remain an advisory (unknown
+        # other callers), but this known caller cannot grant 3 write scopes.
+        self.assertNotIn("PTL005", {f.rule_id for f in results
+                                   if "trigger.yml:delegate" in f.job})
+
+    def test_read_only_caller_and_github_token_context_is_not_secret_escalation(self):
+        self.add("trigger.yml", self.caller(permission="contents: read"))
+        self.add("agent.yml", """on: workflow_call
+jobs:
+  agent:
+    permissions: {contents: read}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env: {TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+        with: {prompt: "${{ inputs.question }}"}
+""")
+        self.assertNotIn("PTL007", {f.rule_id for f in self.findings()})
+
     def test_bracket_workflow_call_input(self):
         self.add("trigger.yml", self.caller(supplied="${{ github['event']['comment']['body'] }}"))
         self.add("agent.yml", self.callee(expr="${{ inputs['question'] }}"))
