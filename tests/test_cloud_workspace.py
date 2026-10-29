@@ -61,6 +61,47 @@ class CloudWorkspaceSafetyTests(unittest.TestCase):
         ):
             self.assertIn(rule, rules["deny"])
 
+    def test_claude_settings_exact_scope(self) -> None:
+        # Prevent permission-approval bugs from committing new grants or local paths.
+        # See anthropics/claude-code#83588 (duplicate of #77530).
+        cfg = json.loads((ROOT / ".claude/settings.json").read_text(encoding="utf-8"))
+        self.assertEqual({"permissions"}, set(cfg), "Unexpected Claude project settings")
+        self.assertEqual({"deny"}, set(cfg["permissions"]), "Unexpected permission grants or directories")
+        expected = {
+            "Read(./.env)",
+            "Read(./.env.*)",
+            "Read(./**/.env)",
+            "Read(./**/.env.*)",
+            "Read(./secrets/**)",
+            "Read(./.claude/settings.local.json)",
+            "Read(./**/*.pem)",
+            "Read(./**/*.key)",
+            "Read(./**/*.p12)",
+            "Read(./**/id_rsa)",
+            "Read(./**/id_ed25519)",
+            "Bash(gh repo delete *)",
+            "Bash(gh repo edit *)",
+            "Bash(gh secret *)",
+            "Bash(git push --force *)",
+            "Bash(git push --force-with-lease *)",
+            "Bash(git push -f *)",
+            "Bash(git reset --hard *)",
+            "Bash(rm -rf *)",
+        }
+        self.assertEqual(expected, set(cfg["permissions"]["deny"]))
+        self.assertEqual(len(expected), len(cfg["permissions"]["deny"]))
+        self.assertNotRegex(
+            json.dumps(cfg), r"(?i)(?:/Users/|/home/|[A-Za-z]:\\\\Users\\\\|AppData|/tmp/)",
+            "Local machine paths must not be committed",
+        )
+
+    def test_no_new_agent_or_workflow_execution_surfaces(self) -> None:
+        paths = {p.as_posix() for p in tracked_files()}
+        claude_files = {p for p in paths if p.startswith(".claude/")}
+        workflows = {p for p in paths if p.startswith(".github/workflows/")}
+        self.assertEqual({".claude/settings.json"}, claude_files)
+        self.assertEqual({".github/workflows/ci.yml"}, workflows)
+
     def test_github_actions_read_only(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertRegex(ci, r"(?m)^permissions:\n  contents: read$")

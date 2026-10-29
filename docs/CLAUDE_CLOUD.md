@@ -9,6 +9,12 @@ This is a **public, self-contained Python repository** for testing Claude Code c
 4. Keep the cloud session on its normal official Claude account. Do not copy tokens, browser state, subscriptions, session files, or local agent profiles from any Windows app or third-party provider.
 5. Inspect the session's active permission mode and `/permissions`. Confirm that committed project deny rules are actually loaded. If not, reduce access at the cloud environment / GitHub App layer instead of relying on `CLAUDE.md` alone.
 
+## 2026-10 community lessons
+- Prefer the **official GitHub App** to `/web-setup` for this setup. Anthropic says `/web-setup` uploads your local `gh` credential, which may reach every repository accessible to that token; it is not the one-repository authorization boundary intended here.
+- Claude Code issue [#83588](https://github.com/anthropics/claude-code/issues/83588) reports local permission approvals appearing in tracked project `.claude/settings.json`, sometimes with personal filesystem paths. CI therefore requires **exactly** the committed deny rules, with no new `permissions.allow`, hooks, extra directories, or plugin settings. Do not auto-merge a PR that changes this guard.
+- Reports of accidental repository deletion reinforce that `CLAUDE.md` is advisory. Keep independent backups and turn on **server-side GitHub rulesets** for the main branch. Project deny rules are supplemental, not an irrevocable barrier to shell commands.
+- GitHub App installation scope cannot stop the App from reading public repositories in general; it limits the selected **private** repositories available to the installation. Keep all personal state and production projects private and out of cloud sessions.
+
 ## First cloud task (safe smoke)
 Ask Claude to read `CLAUDE.md`, inspect the project, install the existing Python package, then run:
 
