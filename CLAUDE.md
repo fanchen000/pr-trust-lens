@@ -26,3 +26,10 @@ For rule changes, add or update a focused regression test. Report what ran and a
 - Do not execute scanned workflows or untrusted downloaded code. The scanner analyzes text; it is not a sandbox.
 - Prefer existing dependencies and offline analysis. Do not add telemetry or automatic network uploads.
 - Do not invent external adoption, vulnerability confirmations, release status, or test results.
+
+## Claude Code cloud
+- Work on **this repository only**, in a single-repo cloud session. Do not attach other repositories, local Windows sessions, or personal context files.
+- The committed `.claude/settings.json` supplies extra deny rules only where Claude Code loads single-repo project settings. It is not a sandbox or a substitute for GitHub branch protection.
+- Do not configure API keys, repository secrets, MCP servers, personal tokens, custom setup scripts, or third-party routing to work on this project.
+- Make changes on a task branch, run the tests, and leave a PR for review. Do not self-merge or make unrelated repository-settings changes.
+- See `docs/CLAUDE_CLOUD.md` for initial connection and environment verification.
